@@ -852,7 +852,7 @@ def main():
     
     st.markdown('<div class="chapter-header">🤖 Claude分析入口</div>', unsafe_allow_html=True)
     
-    prompt = generate_claude_prompt(indicators, scores, scorer, advanced)
+    prompt = generate_claude_prompt(indicators, scores, scorer)
     
     st.markdown("点击下方按钮复制数据摘要，粘贴给Claude进行深度分析：")
     

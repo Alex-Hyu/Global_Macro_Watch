@@ -148,59 +148,66 @@ def generate_claude_prompt(indicators, scores, scorer, advanced=None):
 {alerts_str}
 """
 
-    # 添加高级分析数据
-    if advanced:
-        # 经济周期
-        cycle = advanced.get('economic_cycle', {})
-        if cycle.get('cycle'):
-            prompt += f"""
+    # 添加新增的分析数据（直接从indicators获取）
+    # 经济周期
+    cycle = indicators.get('economic_cycle', {})
+    if cycle.get('cycle') and cycle.get('cycle') != 'N/A':
+        growth_signal = cycle.get('growth_signal', {})
+        inflation_signal = cycle.get('inflation_signal', {})
+        prompt += f"""
 ### 八、经济周期定位
 - **当前周期: {cycle.get('cycle', 'N/A')}**
-- 描述: {cycle.get('cycle_description', '')}
-- 增长信号: {cycle.get('growth_signal', 'N/A')}
-- 通胀信号: {cycle.get('inflation_signal', 'N/A')}
+- 描述: {cycle.get('cycle_desc', '')}
+- 增长信号: 铜/金比率20日变化 {growth_signal.get('change_20d', 0):+.1f}% ({growth_signal.get('direction', 'N/A')})
+- 通胀信号: 通胀预期20日变化 {inflation_signal.get('change_20d_bp', 0):+.0f}bp ({inflation_signal.get('direction', 'N/A')})
 - 周期有利资产: {', '.join(cycle.get('favorable_assets', []))}
 - 周期不利资产: {', '.join(cycle.get('unfavorable_assets', []))}
 """
 
-        # RS动量
-        rs_momentum = advanced.get('rs_momentum', [])
-        if rs_momentum:
-            prompt += """
+    # RS动量
+    rs_momentum = indicators.get('rs_momentum', [])
+    if rs_momentum:
+        prompt += """
 ### 九、RS动量分析 (资金流动方向)
 """
-            acc_up = [x for x in rs_momentum if x['status_code'] == 'accelerating_up']
-            dec_up = [x for x in rs_momentum if x['status_code'] == 'decelerating_up']
-            dec_down = [x for x in rs_momentum if x['status_code'] == 'decelerating_down']
-            acc_down = [x for x in rs_momentum if x['status_code'] == 'accelerating_down']
-            
-            if acc_up:
-                prompt += f"**加速流入:** {', '.join([x['name'] for x in acc_up[:4]])}\n"
-            if dec_up:
-                prompt += f"**流入放缓(可能见顶):** {', '.join([x['name'] for x in dec_up[:4]])}\n"
-            if dec_down:
-                prompt += f"**流出放缓(可能见底):** {', '.join([x['name'] for x in dec_down[:4]])}\n"
-            if acc_down:
-                prompt += f"**加速流出:** {', '.join([x['name'] for x in acc_down[:4]])}\n"
+        acc_up = [x for x in rs_momentum if x['status'] == '加速上涨']
+        dec_up = [x for x in rs_momentum if x['status'] == '上涨减速']
+        dec_down = [x for x in rs_momentum if x['status'] == '下跌减速']
+        acc_down = [x for x in rs_momentum if x['status'] == '加速下跌']
+        
+        if acc_up:
+            prompt += f"**🚀 加速流入:** {', '.join([x['name'] for x in acc_up[:4]])}\n"
+        if dec_up:
+            prompt += f"**⚠️ 流入放缓(可能见顶):** {', '.join([x['name'] for x in dec_up[:4]])}\n"
+        if dec_down:
+            prompt += f"**🔄 流出放缓(可能见底):** {', '.join([x['name'] for x in dec_down[:4]])}\n"
+        if acc_down:
+            prompt += f"**📉 加速流出:** {', '.join([x['name'] for x in acc_down[:4]])}\n"
 
-        # 领先指标
-        leading = advanced.get('leading_indicators', [])
-        if leading:
-            prompt += """
+    # 领先指标
+    leading = indicators.get('leading_indicators', [])
+    if leading:
+        prompt += """
 ### 十、领先指标信号
 """
-            for ind in leading:
-                prompt += f"- {ind['name']}: {ind['value']} ({ind['change']}) {ind['signal']}\n"
+        for ind in leading:
+            change_val = ind.get('change_20d', 0)
+            unit = ind.get('unit', '%')
+            if unit == 'bp':
+                change_str = f"{change_val:+.0f}bp"
+            else:
+                change_str = f"{change_val:+.1f}%"
+            prompt += f"- {ind['name']}: {ind['value']} (20日变化: {change_str}) {ind['signal']}\n"
 
-        # 相关性异常
-        corr = advanced.get('correlation_monitor', [])
-        abnormal = [c for c in corr if '异常' in c['status']]
-        if abnormal:
-            prompt += """
+    # 相关性异常
+    corr = indicators.get('correlation_monitor', [])
+    abnormal = [c for c in corr if '异常' in c.get('status', '')]
+    if abnormal:
+        prompt += """
 ### 十一、相关性异常
 """
-            for c in abnormal:
-                prompt += f"- {c['name']}: 当前{c['current']:.2f} vs 历史{c['hist_mean']:.2f} - {c['interpretation']}\n"
+        for c in abnormal:
+            prompt += f"- {c['name']}: 当前{c['current_corr']:.2f} vs 历史均值{c['hist_mean']:.2f} - {c['interpretation']}\n"
 
     prompt += """
 ---
