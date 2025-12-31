@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime
 
 
-def generate_claude_prompt(indicators, scores, scorer):
+def generate_claude_prompt(indicators, scores, scorer, advanced=None):
     """生成Claude分析入口的prompt"""
     
     date_str = datetime.now().strftime('%Y-%m-%d')
@@ -146,25 +146,82 @@ def generate_claude_prompt(indicators, scores, scorer):
 
 ### 七、预警信号
 {alerts_str}
+"""
+
+    # 添加高级分析数据
+    if advanced:
+        # 经济周期
+        cycle = advanced.get('economic_cycle', {})
+        if cycle.get('cycle'):
+            prompt += f"""
+### 八、经济周期定位
+- **当前周期: {cycle.get('cycle', 'N/A')}**
+- 描述: {cycle.get('cycle_description', '')}
+- 增长信号: {cycle.get('growth_signal', 'N/A')}
+- 通胀信号: {cycle.get('inflation_signal', 'N/A')}
+- 周期有利资产: {', '.join(cycle.get('favorable_assets', []))}
+- 周期不利资产: {', '.join(cycle.get('unfavorable_assets', []))}
+"""
+
+        # RS动量
+        rs_momentum = advanced.get('rs_momentum', [])
+        if rs_momentum:
+            prompt += """
+### 九、RS动量分析 (资金流动方向)
+"""
+            acc_up = [x for x in rs_momentum if x['status_code'] == 'accelerating_up']
+            dec_up = [x for x in rs_momentum if x['status_code'] == 'decelerating_up']
+            dec_down = [x for x in rs_momentum if x['status_code'] == 'decelerating_down']
+            acc_down = [x for x in rs_momentum if x['status_code'] == 'accelerating_down']
+            
+            if acc_up:
+                prompt += f"**加速流入:** {', '.join([x['name'] for x in acc_up[:4]])}\n"
+            if dec_up:
+                prompt += f"**流入放缓(可能见顶):** {', '.join([x['name'] for x in dec_up[:4]])}\n"
+            if dec_down:
+                prompt += f"**流出放缓(可能见底):** {', '.join([x['name'] for x in dec_down[:4]])}\n"
+            if acc_down:
+                prompt += f"**加速流出:** {', '.join([x['name'] for x in acc_down[:4]])}\n"
+
+        # 领先指标
+        leading = advanced.get('leading_indicators', [])
+        if leading:
+            prompt += """
+### 十、领先指标信号
+"""
+            for ind in leading:
+                prompt += f"- {ind['name']}: {ind['value']} ({ind['change']}) {ind['signal']}\n"
+
+        # 相关性异常
+        corr = advanced.get('correlation_monitor', [])
+        abnormal = [c for c in corr if '异常' in c['status']]
+        if abnormal:
+            prompt += """
+### 十一、相关性异常
+"""
+            for c in abnormal:
+                prompt += f"- {c['name']}: 当前{c['current']:.2f} vs 历史{c['hist_mean']:.2f} - {c['interpretation']}\n"
+
+    prompt += """
 ---
 
 **请基于以上数据进行分析：**
 
-1. **流动性评估**: 当前Fed净流动性水位对风险资产的支撑/压制程度如何？RRP和TGA的变化趋势意味着什么？
+1. **流动性评估**: 当前Fed净流动性水位对风险资产的支撑/压制程度如何?
 
-2. **货币环境影响**: 美元和日元的趋势对不同资产类别（美股、商品、新兴市场、加密货币）有何影响？Carry Trade风险是否需要关注？
+2. **经济周期判断**: 根据铜/金比率和通胀预期变化，当前处于什么周期阶段?这对资产配置有何指导意义?
 
-3. **资金轮动方向**: 全球资金正在流向哪些资产？这种轮动的持续性如何？
+3. **资金轮动方向**: 哪些资产正在加速获得资金流入?哪些可能见顶或见底?
 
-4. **美股健康度**: 美股内部结构（风险偏好、板块轮动、市场广度）反映出什么信号？是否有隐藏的风险？
+4. **领先指标信号**: 各领先指标发出的信号是否一致?是否有潜在的转折信号?
 
-5. **央行政策路径**: 基于当前市场定价，Fed和BOJ未来的政策路径可能如何？对资产配置有何影响？
+5. **相关性异常**: 如有相关性异常，这意味着什么?是否暗示市场regime变化?
 
-6. **风险提示**: 当前需要关注的主要风险点是什么？未来1-2周有哪些关键事件或数据可能改变当前格局？
+6. **风险提示**: 当前需要关注的主要风险点是什么?
 
-7. **资产配置建议**: 基于以上分析，给出当前环境下的资产配置倾向性建议。
+7. **资产配置建议**: 综合以上分析，给出当前环境下的资产配置倾向性建议。
 
-请用中文回答，语言简洁专业，重点突出，避免泛泛而谈。
+请用中文回答，语言简洁专业，重点突出。
 """
     
     return prompt

@@ -555,9 +555,219 @@ def main():
         rot_score_val = scores['rotation']['score']
         st.metric("🌐 轮动评分", f"{rot_score_val:.0f}/100")
     
-    # ==================== 第四章：美股结构 ====================
+    # ==================== 第三章续：RS动量与热力图 ====================
     
-    st.markdown('<div class="chapter-header">🇺🇸 第四章：美股内部结构</div>', unsafe_allow_html=True)
+    # 新增指标已在indicators中计算
+    rs_momentum = indicators.get('rs_momentum', [])
+    
+    st.markdown("### 📈 RS动量分析 (动量的动量)")
+    st.markdown('*区分资产是"正在变强"还是"已强但在转弱"*')
+    
+    if rs_momentum:
+        # 四象限分类显示
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**🚀 加速上涨** (RS>0, 动量>0)")
+            acc_up = [x for x in rs_momentum if x['status'] == '加速上涨']
+            if acc_up:
+                for item in acc_up[:4]:
+                    st.markdown(f"- {item['name']}: RS={item['rs_z']:.2f}σ, 动量=+{item['rs_momentum']:.2f}")
+            else:
+                st.markdown("*无*")
+            
+            st.markdown("**🔄 下跌减速** (RS<0, 动量>0)")
+            dec_down = [x for x in rs_momentum if x['status'] == '下跌减速']
+            if dec_down:
+                for item in dec_down[:4]:
+                    st.markdown(f"- {item['name']}: RS={item['rs_z']:.2f}σ, 动量=+{item['rs_momentum']:.2f}")
+            else:
+                st.markdown("*无*")
+        
+        with col2:
+            st.markdown("**⚠️ 上涨减速** (RS>0, 动量<0)")
+            dec_up = [x for x in rs_momentum if x['status'] == '上涨减速']
+            if dec_up:
+                for item in dec_up[:4]:
+                    st.markdown(f"- {item['name']}: RS={item['rs_z']:.2f}σ, 动量={item['rs_momentum']:.2f}")
+            else:
+                st.markdown("*无*")
+            
+            st.markdown("**📉 加速下跌** (RS<0, 动量<0)")
+            acc_down = [x for x in rs_momentum if x['status'] == '加速下跌']
+            if acc_down:
+                for item in acc_down[:4]:
+                    st.markdown(f"- {item['name']}: RS={item['rs_z']:.2f}σ, 动量={item['rs_momentum']:.2f}")
+            else:
+                st.markdown("*无*")
+    else:
+        st.info("RS动量数据不足")
+    
+    # 轮动热力图
+    st.markdown("### 🗓️ 轮动热力图 (过去12周)")
+    
+    heatmap_data = indicators.get('rotation_heatmap', {})
+    if heatmap_data.get('data') and heatmap_data.get('assets'):
+        import numpy as np
+        
+        # 构建DataFrame
+        heatmap_df = pd.DataFrame(
+            heatmap_data['data'],
+            index=heatmap_data['assets'],
+            columns=heatmap_data['dates']
+        )
+        
+        fig_heatmap = go.Figure(data=go.Heatmap(
+            z=heatmap_df.values,
+            x=heatmap_df.columns.tolist(),
+            y=heatmap_df.index.tolist(),
+            colorscale=[
+                [0, '#FF1744'],      # 红色 (弱)
+                [0.25, '#FF8A80'],   # 浅红
+                [0.5, '#FFEB3B'],    # 黄色 (中性)
+                [0.75, '#69F0AE'],   # 浅绿
+                [1, '#00C853']       # 绿色 (强)
+            ],
+            zmid=0,
+            zmin=-3,
+            zmax=3,
+            text=np.round(heatmap_df.values, 1),
+            texttemplate='%{text}',
+            textfont={"size": 10},
+            hovertemplate='%{y}<br>%{x}<br>Z-Score: %{z:.2f}<extra></extra>',
+        ))
+        
+        fig_heatmap.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font={'color': 'white'},
+            height=350,
+            margin=dict(l=100, r=20, t=30, b=50),
+            xaxis_title='周',
+            yaxis_title='',
+        )
+        
+        st.plotly_chart(fig_heatmap, use_container_width=True)
+    else:
+        st.info("热力图数据不足")
+    
+    # ==================== 第四章：经济周期与领先指标 ====================
+    
+    st.markdown('<div class="chapter-header">📊 第四章：经济周期与领先指标</div>', unsafe_allow_html=True)
+    st.markdown('*"我们处于周期的哪个阶段?"*')
+    
+    # 经济周期定位
+    cycle = indicators.get('economic_cycle', {})
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.markdown("### 🔄 经济周期定位")
+        
+        cycle_name = cycle.get('cycle', 'N/A')
+        if cycle_name != 'N/A':
+            cycle_desc = cycle.get('cycle_desc', '')
+            
+            # 周期图示
+            cycles_list = ['衰退/放缓', '复苏', '扩张/过热', '滞胀']
+            cycle_display = ""
+            for c in cycles_list:
+                if c == cycle_name:
+                    cycle_display += f"**[{c}]** → "
+                else:
+                    cycle_display += f"{c} → "
+            cycle_display = cycle_display.rstrip(' → ')
+            
+            st.markdown(cycle_display)
+            st.markdown(f"**当前阶段: {cycle_name}**")
+            st.markdown(f"*{cycle_desc}*")
+            
+            # 判断依据
+            st.markdown("**判断依据:**")
+            growth_signal = cycle.get('growth_signal', {})
+            if growth_signal:
+                change = growth_signal.get('change_20d', 0)
+                direction = growth_signal.get('direction', '')
+                st.markdown(f"- 铜/金比率 20日变化: {change:+.1f}% ({direction}) {'📈' if change > 0 else '📉'}")
+            
+            inflation_signal = cycle.get('inflation_signal', {})
+            if inflation_signal:
+                change_bp = inflation_signal.get('change_20d_bp', 0)
+                direction = inflation_signal.get('direction', '')
+                st.markdown(f"- 通胀预期 20日变化: {change_bp:+.0f}bp ({direction}) {'🔥' if change_bp > 0 else '❄️'}")
+            
+            curve_signal = cycle.get('curve_signal', {})
+            if curve_signal:
+                crv_change = curve_signal.get('change_20d_bp', 0)
+                shape = curve_signal.get('shape', '')
+                st.markdown(f"- 收益率曲线: {crv_change:+.0f}bp ({shape})")
+        else:
+            st.warning("数据不足，无法判断周期")
+    
+    with col2:
+        st.markdown("### 💡 周期配置建议")
+        
+        if cycle.get('favorable_assets'):
+            st.markdown("**✅ 当前周期有利:**")
+            st.markdown(", ".join(cycle['favorable_assets']))
+        
+        if cycle.get('unfavorable_assets'):
+            st.markdown("**❌ 当前周期不利:**")
+            st.markdown(", ".join(cycle['unfavorable_assets']))
+    
+    # 领先指标仪表盘
+    st.markdown("### 🎯 领先指标仪表盘")
+    
+    leading = indicators.get('leading_indicators', [])
+    if leading:
+        cols = st.columns(3)
+        for i, ind in enumerate(leading):
+            with cols[i % 3]:
+                change_val = ind.get('change_20d', 0)
+                unit = ind.get('unit', '%')
+                if unit == 'bp':
+                    change_str = f"{change_val:+.0f}bp"
+                else:
+                    change_str = f"{change_val:+.1f}%"
+                    
+                st.markdown(f"""
+                **{ind['name']}** {ind['signal']}
+                - 当前: {ind['value']}
+                - 20日变化: {change_str}
+                - *{ind['description']}*
+                """)
+    else:
+        st.info("领先指标数据不足")
+    
+    # 相关性监控
+    st.markdown("### 🔗 相关性异常监控")
+    
+    corr_monitor = indicators.get('correlation_monitor', [])
+    if corr_monitor:
+        # 只显示异常的
+        abnormal = [c for c in corr_monitor if '异常' in c['status']]
+        normal = [c for c in corr_monitor if '正常' in c['status']]
+        
+        if abnormal:
+            st.markdown("**⚠️ 检测到相关性异常:**")
+            for c in abnormal:
+                st.markdown(f"""
+                - **{c['name']}**: 当前={c['current_corr']:.2f} (历史均值={c['hist_mean']:.2f}) {c['status']}
+                  - 解读: *{c['interpretation']}*
+                """)
+        else:
+            st.success("所有监控的相关性对都在正常范围内")
+        
+        with st.expander("查看所有相关性监控"):
+            for c in corr_monitor:
+                normal_range = c.get('normal_range', (0, 0))
+                st.markdown(f"- {c['name']}: {c['current_corr']:.2f} (均值{c['hist_mean']:.2f}, 正常范围{normal_range[0]:.1f}~{normal_range[1]:.1f}) {c['status']}")
+    else:
+        st.info("相关性监控数据不足")
+    
+    # ==================== 第五章：美股结构 ====================
+    
+    st.markdown('<div class="chapter-header">🇺🇸 第五章：美股内部结构</div>', unsafe_allow_html=True)
     st.markdown('*"美股内部,钱在怎么转?"*')
     
     us = indicators.get('us_structure', {})
@@ -642,7 +852,7 @@ def main():
     
     st.markdown('<div class="chapter-header">🤖 Claude分析入口</div>', unsafe_allow_html=True)
     
-    prompt = generate_claude_prompt(indicators, scores, scorer)
+    prompt = generate_claude_prompt(indicators, scores, scorer, advanced)
     
     st.markdown("点击下方按钮复制数据摘要，粘贴给Claude进行深度分析：")
     
