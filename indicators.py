@@ -265,11 +265,19 @@ class IndicatorCalculator:
         
         # ==================== 央行政策代理指标 ====================
         
+        # 获取当前Fed利率 (优先使用FRED DFF数据)
+        current_fed_rate = CURRENT_FED_RATE  # 默认值
+        if 'DFF' in self.fred.columns:
+            dff = self.fred['DFF'].dropna()
+            if len(dff) > 0:
+                current_fed_rate = dff.iloc[-1]
+                print(f"✓ 使用FRED实时Fed利率: {current_fed_rate:.2f}%")
+        
         # Fed政策预期: 2Y国债 vs 当前Fed利率
         if 'DGS2' in self.fred.columns:
             dgs2 = self.fred['DGS2'].dropna()
             if len(dgs2) > 0:
-                fed_policy_signal = dgs2.iloc[-1] - CURRENT_FED_RATE
+                fed_policy_signal = dgs2.iloc[-1] - current_fed_rate
                 # 负值越大 = 市场定价越多降息
                 if fed_policy_signal < -0.75:
                     fed_outlook = '鸽派 (市场预期多次降息)'
@@ -284,7 +292,7 @@ class IndicatorCalculator:
                     'dgs2': dgs2.iloc[-1],
                     'signal': fed_policy_signal,
                     'outlook': fed_outlook,
-                    'current_rate': CURRENT_FED_RATE,
+                    'current_rate': current_fed_rate,
                 }
         
         # BOJ政策预期: 用USDJPY动量作为代理
