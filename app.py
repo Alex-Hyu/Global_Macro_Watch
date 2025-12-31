@@ -312,10 +312,51 @@ def main():
     
     with st.spinner("正在加载数据..."):
         all_data = load_data()
+    
+    # 检查是否有任何数据
+    has_data = False
+    data_status = []
+    
+    if all_data['fred'] is not None and not all_data['fred'].empty:
+        has_data = True
+        data_status.append(f"FRED: {len(all_data['fred'].columns)}个指标")
+    else:
+        data_status.append("FRED: 无数据")
         
-    if all_data['yahoo'].empty and all_data['fred'].empty:
-        st.error("数据加载失败，请检查网络连接后刷新页面")
-        return
+    if all_data['yahoo'] is not None and not all_data['yahoo'].empty:
+        has_data = True
+        data_status.append(f"Yahoo: {len(all_data['yahoo'].columns)}个标的")
+    else:
+        data_status.append("Yahoo: 无数据")
+        
+    if all_data['akshare'] is not None and not all_data['akshare'].empty:
+        has_data = True
+        data_status.append(f"AKShare: {len(all_data['akshare'].columns)}个指数")
+    else:
+        data_status.append("AKShare: 无数据")
+    
+    # 显示数据状态
+    with st.expander("📡 数据源状态", expanded=not has_data):
+        for status in data_status:
+            if "无数据" in status:
+                st.warning(status)
+            else:
+                st.success(status)
+        
+        if not has_data:
+            st.error("""
+            **所有数据源都无法连接，请检查:**
+            1. 网络连接是否正常
+            2. 是否需要设置代理
+            3. 尝试点击"刷新数据"按钮
+            
+            **如果在Streamlit Cloud部署:**
+            - 添加 `FRED_API_KEY` 到 Secrets
+            - 确保 requirements.txt 包含所有依赖
+            """)
+            st.stop()
+        elif "无数据" in str(data_status):
+            st.info("部分数据源不可用，显示的指标可能不完整")
     
     with st.spinner("正在计算指标..."):
         indicators = compute_indicators(all_data)
