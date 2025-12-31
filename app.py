@@ -371,7 +371,7 @@ def main():
     # ==================== 第一章：流动性 ====================
     
     st.markdown('<div class="chapter-header">🌊 第一章：流动性水位</div>', unsafe_allow_html=True)
-    st.markdown("*"钱从哪里来？有多少？"*")
+    st.markdown('*"钱从哪里来?有多少?"*')
     
     liq = indicators.get('liquidity', {})
     
@@ -424,7 +424,7 @@ def main():
     # ==================== 第二章：货币/利率 ====================
     
     st.markdown('<div class="chapter-header">💱 第二章：货币与利率风向</div>', unsafe_allow_html=True)
-    st.markdown("*"钱更愿意待在哪种货币/资产里？"*")
+    st.markdown('*"钱更愿意待在哪种货币/资产里?"*')
     
     curr = indicators.get('currency', {})
     
@@ -484,7 +484,7 @@ def main():
     # ==================== 第三章：全球轮动 ====================
     
     st.markdown('<div class="chapter-header">🌍 第三章：全球资产轮动雷达</div>', unsafe_allow_html=True)
-    st.markdown("*"资金在全球怎么流动？"*")
+    st.markdown('*"资金在全球怎么流动?"*')
     
     rot = indicators.get('rotation', {})
     
@@ -517,7 +517,7 @@ def main():
     # ==================== 第四章：美股结构 ====================
     
     st.markdown('<div class="chapter-header">🇺🇸 第四章：美股内部结构</div>', unsafe_allow_html=True)
-    st.markdown("*"美股内部，钱在怎么转？"*")
+    st.markdown('*"美股内部,钱在怎么转?"*')
     
     us = indicators.get('us_structure', {})
     
