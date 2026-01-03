@@ -474,10 +474,14 @@ def main():
             delta_color="normal"
         )
         # 显示趋势和百分位
-        z_val = net_liq.get('z_60d', 0)
-        pct_val = net_liq.get('pct_252d', 0)
-        if not np.isnan(z_val) and not np.isnan(pct_val):
-            st.caption(f"Z: {z_val:.2f}σ | 252日分位: {pct_val:.0f}%")
+        z_val = net_liq.get('z_60d')
+        pct_val = net_liq.get('pct_252d')
+        if z_val is not None and pct_val is not None:
+            try:
+                if not np.isnan(z_val) and not np.isnan(pct_val):
+                    st.caption(f"Z: {z_val:.2f}σ | 252日分位: {pct_val:.0f}%")
+            except:
+                pass
     
     with cols[1]:
         rrp = liq.get('rrp', {})
