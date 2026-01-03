@@ -298,6 +298,10 @@ def create_currency_chart(yahoo_data):
 def main():
     st.markdown('<div class="main-header">🌍 宏观战情室 V2</div>', unsafe_allow_html=True)
     
+    # 初始化快照管理器
+    from snapshot_manager import SnapshotManager
+    snapshot_mgr = SnapshotManager()
+    
     with st.sidebar:
         st.header("⚙️ 控制面板")
         
@@ -309,6 +313,27 @@ def main():
         
         show_charts = st.checkbox("显示图表", value=True)
         show_details = st.checkbox("显示详细数据", value=False)
+        
+        # ==================== 快照管理 ====================
+        st.divider()
+        st.subheader("📸 数据快照")
+        
+        # 获取快照统计
+        snapshot_stats = snapshot_mgr.get_snapshot_stats()
+        
+        # 显示状态
+        if snapshot_stats['today_saved']:
+            st.success("✅ 今日快照已保存")
+        else:
+            st.warning("❌ 今日快照未保存")
+        
+        # 显示历史统计
+        if snapshot_stats['count'] > 0:
+            st.caption(f"历史记录: {snapshot_stats['count']} 天")
+            st.caption(f"最早: {snapshot_stats['earliest_date']}")
+            st.caption(f"最新: {snapshot_stats['latest_date']}")
+        else:
+            st.caption("暂无历史记录")
     
     with st.spinner("正在加载数据..."):
         all_data = load_data()
@@ -363,6 +388,28 @@ def main():
     
     scorer = ScoringSystem(indicators)
     scores = scorer.calc_total_score()
+    
+    # ==================== 快照保存按钮（在侧边栏，但需要数据） ====================
+    with st.sidebar:
+        # 保存按钮
+        if not snapshot_stats['today_saved']:
+            if st.button("💾 保存今日快照", use_container_width=True):
+                success, message = snapshot_mgr.save_today_snapshot(indicators, scores, all_data)
+                if success:
+                    st.success(message)
+                    st.rerun()  # 刷新页面更新状态
+                else:
+                    st.warning(message)
+        else:
+            st.button("💾 今日已保存", use_container_width=True, disabled=True)
+        
+        # 更新历史收益按钮
+        if snapshot_stats['count'] > 0:
+            if st.button("📈 更新历史收益", use_container_width=True):
+                yahoo_data = all_data.get('yahoo', pd.DataFrame())
+                if not yahoo_data.empty:
+                    updated = snapshot_mgr.update_forward_returns(yahoo_data)
+                    st.info(f"更新了 {updated} 条收益数据")
     
     st.markdown(f"**数据更新时间:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
