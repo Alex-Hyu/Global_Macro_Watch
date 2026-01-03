@@ -29,6 +29,7 @@ YAHOO_INDICATORS = {
     'JPY=X': 'USDJPY',
     # 波动率
     '^VIX': 'VIX',
+    '^MOVE': 'MOVE债市波动',
     # 信用
     'HYG': '高收益债ETF',
     'LQD': '投资级债ETF',

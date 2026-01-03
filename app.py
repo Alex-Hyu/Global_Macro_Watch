@@ -473,6 +473,11 @@ def main():
             f"{net_liq.get('change_20d', 0):.1f}% (20d)",
             delta_color="normal"
         )
+        # 显示趋势和百分位
+        z_val = net_liq.get('z_60d', 0)
+        pct_val = net_liq.get('pct_252d', 0)
+        if not np.isnan(z_val) and not np.isnan(pct_val):
+            st.caption(f"Z: {z_val:.2f}σ | 252日分位: {pct_val:.0f}%")
     
     with cols[1]:
         rrp = liq.get('rrp', {})
@@ -516,7 +521,7 @@ def main():
     
     curr = indicators.get('currency', {})
     
-    cols = st.columns(6)
+    cols = st.columns(7)
     
     with cols[0]:
         dxy = curr.get('dxy', {})
@@ -536,9 +541,16 @@ def main():
     
     with cols[4]:
         vix = curr.get('vix', {})
-        st.metric("VIX", f"{vix.get('latest', 0):.1f}")
+        st.metric("VIX股市波动", f"{vix.get('latest', 0):.1f}", f"Z: {vix.get('z_60d', 0):.2f}σ")
     
     with cols[5]:
+        move = curr.get('move', {})
+        if move:
+            st.metric("MOVE债市波动", f"{move.get('latest', 0):.1f}", f"Z: {move.get('z_60d', 0):.2f}σ")
+        else:
+            st.metric("MOVE债市波动", "N/A")
+    
+    with cols[6]:
         curr_score_val = scores['currency']['score']
         st.metric("🧭 货币环境评分", f"{curr_score_val:.0f}/100")
     

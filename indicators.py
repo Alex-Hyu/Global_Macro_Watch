@@ -263,6 +263,16 @@ class IndicatorCalculator:
                     'z_60d': self.calc_zscore(vix, 60).iloc[-1] if len(vix) > 60 else np.nan,
                 }
         
+        # MOVE债市波动指数
+        if '^MOVE' in self.yahoo.columns:
+            move = self.yahoo['^MOVE'].dropna()
+            if len(move) > 0:
+                results['move'] = {
+                    'latest': move.iloc[-1],
+                    'z_60d': self.calc_zscore(move, 60).iloc[-1] if len(move) > 60 else np.nan,
+                    'pct_252d': self.calc_percentile(move, 252).iloc[-1] if len(move) > 252 else np.nan,
+                }
+        
         # ==================== 央行政策代理指标 ====================
         
         # 获取当前Fed利率 (优先使用FRED DFF数据)
