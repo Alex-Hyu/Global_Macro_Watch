@@ -25,6 +25,21 @@ from scoring import ScoringSystem
 from prompt_generator import generate_claude_prompt, generate_short_summary
 from config import COLORS, get_score_color, ALERT_THRESHOLDS
 
+# 导入新模块
+try:
+    from rotation_scanner import (
+        get_sofr_repo_history, 
+        get_rrp_tga_history,
+        scan_etf_flows,
+        get_etf_flow_summary,
+        calculate_breadth_radar,
+        calculate_rotation_score,
+        SECTOR_ETFS,
+    )
+    ROTATION_SCANNER_AVAILABLE = True
+except ImportError:
+    ROTATION_SCANNER_AVAILABLE = False
+
 # ==================== 样式 ====================
 
 st.markdown("""
@@ -293,6 +308,183 @@ def create_currency_chart(yahoo_data):
     
     return fig
 
+
+# ==================== 新增图表函数 ====================
+
+def create_sofr_repo_chart(sofr_data):
+    """创建SOFR/Repo利差图表"""
+    if not sofr_data.get('dates'):
+        return None
+    
+    fig = make_subplots(
+        rows=2, cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.12,
+        row_heights=[0.6, 0.4],
+        subplot_titles=('SOFR vs Repo (TGCR) 利率', 'SOFR-Repo 利差')
+    )
+    
+    # 上图：SOFR和TGCR利率
+    fig.add_trace(
+        go.Scatter(
+            x=sofr_data['dates'], 
+            y=sofr_data['sofr'],
+            name='SOFR', 
+            line=dict(color='#0d6efd', width=2)
+        ),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=sofr_data['dates'], 
+            y=sofr_data['tgcr'],
+            name='Repo (TGCR)', 
+            line=dict(color='#198754', width=2)
+        ),
+        row=1, col=1
+    )
+    
+    # 下图：利差柱状图
+    spread_colors = ['#dc3545' if s > 0.05 else '#ffc107' if s > 0.02 else '#198754' 
+                     for s in sofr_data['spread']]
+    
+    fig.add_trace(
+        go.Bar(
+            x=sofr_data['dates'], 
+            y=sofr_data['spread'],
+            name='利差', 
+            marker_color=spread_colors
+        ),
+        row=2, col=1
+    )
+    
+    # 添加警戒线
+    fig.add_hline(y=0.05, line_dash="dash", line_color="red", 
+                  annotation_text="警戒线 0.05%", row=2, col=1)
+    
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font={'color': 'white'},
+        height=350,
+        margin=dict(l=50, r=30, t=50, b=30),
+        showlegend=True,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02),
+    )
+    
+    fig.update_xaxes(showgrid=True, gridcolor='rgba(255,255,255,0.1)')
+    fig.update_yaxes(showgrid=True, gridcolor='rgba(255,255,255,0.1)')
+    
+    return fig
+
+
+def create_radar_chart(radar_data):
+    """创建市场广度雷达图"""
+    categories = radar_data['categories']
+    values = radar_data['normalized']
+    
+    # 闭合雷达图
+    categories_closed = categories + [categories[0]]
+    values_closed = values + [values[0]]
+    
+    fig = go.Figure()
+    
+    # 当前值
+    fig.add_trace(go.Scatterpolar(
+        r=values_closed,
+        theta=categories_closed,
+        fill='toself',
+        fillcolor='rgba(0,212,255,0.2)',
+        line=dict(color='#00d4ff', width=2),
+        name='当前'
+    ))
+    
+    # 中性线 (50)
+    fig.add_trace(go.Scatterpolar(
+        r=[50] * len(categories_closed),
+        theta=categories_closed,
+        mode='lines',
+        line=dict(color='gray', dash='dash', width=1),
+        name='中性线'
+    ))
+    
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickfont=dict(size=10, color='white'),
+                gridcolor='rgba(255,255,255,0.2)',
+            ),
+            angularaxis=dict(
+                tickfont=dict(size=12, color='white'),
+                gridcolor='rgba(255,255,255,0.2)',
+            ),
+            bgcolor='rgba(0,0,0,0)',
+        ),
+        paper_bgcolor='rgba(0,0,0,0)',
+        font={'color': 'white'},
+        showlegend=False,
+        height=350,
+        margin=dict(l=60, r=60, t=30, b=30),
+    )
+    
+    return fig
+
+
+def create_rotation_gauge(score, title="资金轮动评分"):
+    """创建资金轮动仪表盘"""
+    # 确定颜色
+    if score > 60:
+        bar_color = '#00C853'
+    elif score > 20:
+        bar_color = '#90EE90'
+    elif score > -20:
+        bar_color = '#FFD600'
+    elif score > -60:
+        bar_color = '#FF9800'
+    else:
+        bar_color = '#FF1744'
+    
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=score,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': title, 'font': {'size': 18, 'color': 'white'}},
+        delta={'reference': 0, 'increasing': {'color': "green"}, 'decreasing': {'color': "red"}},
+        number={'font': {'size': 36, 'color': 'white'}},
+        gauge={
+            'axis': {'range': [-100, 100], 'tickwidth': 1, 'tickcolor': "white", 'tickfont': {'color': 'white'}},
+            'bar': {'color': bar_color},
+            'bgcolor': "rgba(0,0,0,0)",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [-100, -60], 'color': 'rgba(255,23,68,0.3)'},
+                {'range': [-60, -20], 'color': 'rgba(255,152,0,0.3)'},
+                {'range': [-20, 20], 'color': 'rgba(255,214,0,0.3)'},
+                {'range': [20, 60], 'color': 'rgba(144,238,144,0.3)'},
+                {'range': [60, 100], 'color': 'rgba(0,200,83,0.3)'},
+            ],
+            'threshold': {
+                'line': {'color': "white", 'width': 4},
+                'thickness': 0.75,
+                'value': score
+            }
+        }
+    ))
+    
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font={'color': 'white'},
+        height=280,
+        margin=dict(l=20, r=20, t=50, b=20)
+    )
+    
+    return fig
+
 # ==================== 主程序 ====================
 
 def main():
@@ -517,6 +709,47 @@ def main():
         fig_liq = create_liquidity_chart(liq, all_data.get('yahoo'))
         if fig_liq:
             st.plotly_chart(fig_liq, use_container_width=True)
+    
+    # ==================== SOFR/Repo 利差监控 ====================
+    
+    if ROTATION_SCANNER_AVAILABLE:
+        with st.expander("📊 SOFR/Repo 流动性监控 (30天)", expanded=False):
+            sofr_data = get_sofr_repo_history(days=30)
+            
+            if sofr_data.get('success'):
+                # 显示关键指标
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                
+                with col_s1:
+                    st.metric("SOFR", f"{sofr_data['current_sofr']:.2f}%")
+                
+                with col_s2:
+                    st.metric("Repo (TGCR)", f"{sofr_data['current_tgcr']:.2f}%")
+                
+                with col_s3:
+                    spread = sofr_data['current_spread']
+                    delta_color = "inverse" if spread > 0.05 else "normal"
+                    st.metric("利差", f"{spread:.3f}%", 
+                             "⚠️" if spread > 0.05 else "✅",
+                             delta_color=delta_color)
+                
+                with col_s4:
+                    st.markdown(f"**状态:** {sofr_data['spread_alert_msg']}")
+                
+                # 图表
+                fig_sofr = create_sofr_repo_chart(sofr_data)
+                if fig_sofr:
+                    st.plotly_chart(fig_sofr, use_container_width=True)
+                
+                st.caption("""
+                **解读:** SOFR-Repo利差是银行间流动性的关键指标。
+                - 利差 < 0.02%: 流动性充裕 ✅
+                - 利差 0.02-0.05%: 正常范围 ⚪
+                - 利差 > 0.05%: 流动性偏紧 ⚠️
+                - 利差 > 0.10%: 流动性紧缺 🚨
+                """)
+            else:
+                st.info("SOFR/Repo数据暂时不可用，请稍后刷新")
     
     # ==================== 第二章：货币/利率 ====================
     
@@ -863,6 +1096,131 @@ def main():
     
     us_score_val = scores['us_structure']['score']
     st.metric("🏛️ 美股结构评分", f"{us_score_val:.0f}/100")
+    
+    # ==================== 第六章：资金轮动仪表盘 ====================
+    
+    if ROTATION_SCANNER_AVAILABLE:
+        st.markdown('<div class="chapter-header">📊 第六章：资金轮动仪表盘</div>', unsafe_allow_html=True)
+        st.markdown('*"资金正在流向哪里？市场广度如何？"*')
+        
+        # 计算资金轮动评分
+        yahoo_data = all_data.get('yahoo', pd.DataFrame())
+        rotation_result = calculate_rotation_score(indicators)
+        radar_data = calculate_breadth_radar(indicators, yahoo_data)
+        
+        # 第一行：仪表盘 + 雷达图
+        col_gauge, col_radar = st.columns([1, 1])
+        
+        with col_gauge:
+            st.markdown("### 💹 资金轮动趋势评分")
+            
+            rotation_score = rotation_result['total_score']
+            fig_gauge = create_rotation_gauge(rotation_score)
+            st.plotly_chart(fig_gauge, use_container_width=True)
+            
+            # 市场状态解读
+            st.markdown(f"**市场状态:** {rotation_result['market_state']}")
+            
+            # 分项评分
+            st.markdown("**分项评分:**")
+            for key, comp in rotation_result['components'].items():
+                score = comp['score']
+                emoji = '🟢' if score > 20 else '🔴' if score < -20 else '⚪'
+                label = {'risk_appetite': '风险偏好', 'sector_rotation': '板块轮动', 'liquidity_breadth': '流动性广度'}.get(key, key)
+                st.markdown(f"- {emoji} {label}: {score:.1f}")
+        
+        with col_radar:
+            st.markdown("### 📡 市场广度雷达图")
+            
+            fig_radar = create_radar_chart(radar_data)
+            st.plotly_chart(fig_radar, use_container_width=True)
+            
+            # 各维度信号
+            st.markdown("**各维度信号:**")
+            for i, cat in enumerate(radar_data['categories']):
+                signal = radar_data['signals'][i]
+                z_val = radar_data['values'][i]
+                st.markdown(f"- {signal} {cat}: Z={z_val:.2f}")
+            
+            # 综合评分
+            composite = radar_data.get('composite_score', 50)
+            st.metric("综合广度评分", f"{composite:.0f}/100")
+        
+        # 第二行：ETF板块资金流入扫描
+        st.markdown("### 📈 ETF板块资金流入扫描")
+        st.markdown('*扫描各板块ETF的趋势强度，识别资金流入方向*')
+        
+        # 扫描ETF
+        etf_scan = scan_etf_flows(yahoo_data)
+        
+        if not etf_scan.empty:
+            # 资金流向摘要
+            flow_summary = get_etf_flow_summary(etf_scan)
+            
+            col_sum1, col_sum2, col_sum3 = st.columns(3)
+            
+            with col_sum1:
+                strong_list = flow_summary['strong_sectors'][:5]
+                if strong_list:
+                    st.success(f"🔥 **强势板块:** {', '.join(strong_list)}")
+                else:
+                    st.info("暂无强势板块")
+            
+            with col_sum2:
+                weak_list = flow_summary['weak_sectors'][:5]
+                if weak_list:
+                    st.error(f"📉 **弱势板块:** {', '.join(weak_list)}")
+                else:
+                    st.info("暂无明显弱势板块")
+            
+            with col_sum3:
+                risk_score = flow_summary['risk_on_score']
+                if risk_score > 3:
+                    st.success(f"**Risk-On评分:** +{risk_score} 🚀")
+                elif risk_score < -3:
+                    st.error(f"**Risk-Off评分:** {risk_score} 🔻")
+                else:
+                    st.info(f"**中性评分:** {risk_score} ⚖️")
+            
+            # ETF扫描表格
+            with st.expander("📋 查看完整ETF扫描结果", expanded=True):
+                # 简化显示
+                display_cols = ['信号', 'ETF', '板块', '价格', '>SMA20', '>SMA50', '动量', 'OBV↑', '20日%', '评分']
+                st.dataframe(
+                    etf_scan[display_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                    height=400
+                )
+                
+                st.caption("""
+                **评分标准 (0-5分):**
+                - 价格 > SMA20 (+1)
+                - 价格 > SMA50 (+1)
+                - 5日动量 > 0 (+1)
+                - OBV上升 (+1)
+                - 20日涨幅 > 0 (+1)
+                
+                **信号解读:** 🟢强势(4-5分) | 🟡偏多(3分) | ⚪中性(2分) | 🔴弱势(0-1分)
+                """)
+        else:
+            st.info("ETF扫描数据暂不可用")
+        
+        # 资金轮动因子详情
+        with st.expander("📊 资金轮动因子详情", expanded=False):
+            st.markdown("**各因子Z-Score分解:**")
+            
+            for key, comp in rotation_result['components'].items():
+                label = {'risk_appetite': '风险偏好因子', 'sector_rotation': '板块轮动因子', 'liquidity_breadth': '流动性广度因子'}.get(key, key)
+                st.markdown(f"#### {label} (权重: {comp['weight']*100:.0f}%)")
+                
+                factors = comp.get('factors', [])
+                if factors:
+                    for f in factors:
+                        z = f.get('z', 0)
+                        emoji = '🟢' if z > 0.5 else '🔴' if z < -0.5 else '⚪'
+                        name = f.get('name', '')
+                        st.markdown(f"- {emoji} {name}: Z={z:.2f}σ")
     
     # ==================== 附录 ====================
     
