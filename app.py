@@ -40,6 +40,17 @@ try:
 except ImportError:
     ROTATION_SCANNER_AVAILABLE = False
 
+# 导入SpotGamma模块
+try:
+    from spotgamma_analyzer import (
+        parse_spotgamma_csv,
+        generate_full_analysis,
+        render_spotgamma_section,
+    )
+    SPOTGAMMA_AVAILABLE = True
+except ImportError:
+    SPOTGAMMA_AVAILABLE = False
+
 # ==================== 样式 ====================
 
 st.markdown("""
@@ -526,6 +537,27 @@ def main():
             st.caption(f"最新: {snapshot_stats['latest_date']}")
         else:
             st.caption("暂无历史记录")
+        
+        # ==================== SpotGamma 数据上传 ====================
+        if SPOTGAMMA_AVAILABLE:
+            st.divider()
+            st.subheader("📊 SpotGamma数据")
+            
+            spotgamma_file = st.file_uploader(
+                "上传SpotGamma CSV",
+                type=['csv'],
+                help="从SpotGamma Data Table导出CSV文件",
+                key="spotgamma_upload"
+            )
+            
+            if spotgamma_file is not None:
+                st.session_state['spotgamma_file'] = spotgamma_file
+                st.success("✅ CSV已上传")
+            elif 'spotgamma_file' in st.session_state:
+                st.info("📄 已有数据")
+                if st.button("🗑️ 清除数据", key="clear_spotgamma"):
+                    del st.session_state['spotgamma_file']
+                    st.rerun()
     
     with st.spinner("正在加载数据..."):
         all_data = load_data()
@@ -1221,6 +1253,45 @@ def main():
                         emoji = '🟢' if z > 0.5 else '🔴' if z < -0.5 else '⚪'
                         name = f.get('name', '')
                         st.markdown(f"- {emoji} {name}: Z={z:.2f}σ")
+    
+    # ==================== 第七章：SpotGamma期权情绪 ====================
+    
+    if SPOTGAMMA_AVAILABLE and 'spotgamma_file' in st.session_state:
+        st.markdown('<div class="chapter-header">🎯 第七章：SpotGamma期权情绪</div>', unsafe_allow_html=True)
+        st.markdown('*"Gamma环境如何？期权市场在押注什么方向？"*')
+        
+        # 解析CSV
+        spotgamma_file = st.session_state['spotgamma_file']
+        
+        # 需要重置文件指针
+        spotgamma_file.seek(0)
+        sg_df = parse_spotgamma_csv(spotgamma_file)
+        
+        if sg_df is not None and not sg_df.empty:
+            # 渲染SpotGamma分析
+            sg_analysis = render_spotgamma_section(sg_df, st)
+            
+            # 存储分析结果供其他模块使用
+            st.session_state['spotgamma_analysis'] = sg_analysis
+        else:
+            st.warning("SpotGamma CSV解析失败，请检查文件格式")
+    elif SPOTGAMMA_AVAILABLE:
+        # 显示提示
+        with st.expander("🎯 SpotGamma期权情绪分析 (未启用)", expanded=False):
+            st.info("""
+            **如何启用SpotGamma分析:**
+            1. 登录 SpotGamma 网站
+            2. 进入 Data Table 页面
+            3. 导出 CSV 文件
+            4. 在左侧边栏上传 CSV
+            
+            **分析内容包括:**
+            - Gamma环境总览 (正/负Gamma)
+            - 关键位地图 (Call Wall, Put Wall, Zero Gamma)
+            - 方向性指标 (Delta Ratio, Gamma Ratio, P/C OI)
+            - 波动率洞察 (IV vs RV, Skew, IV Rank)
+            - 风险预警和交易提示
+            """)
     
     # ==================== 附录 ====================
     
