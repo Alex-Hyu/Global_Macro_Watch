@@ -27,14 +27,14 @@ def parse_spotgamma_csv(uploaded_file) -> Optional[pd.DataFrame]:
         # SpotGamma CSV有多层表头
         df = pd.read_csv(uploaded_file, header=[0, 1])
         
-        # 展平列名
+        # 展平列名并清理特殊字符
         flat_cols = []
         for col in df.columns:
             if 'Unnamed' in str(col[0]):
-                flat_cols.append(col[1])
+                # 清理特殊字符 (如 \xa0 非断空格)
+                flat_cols.append(col[1].replace('\xa0', ' ').strip())
             else:
-                # 简化列名
-                flat_cols.append(col[1])
+                flat_cols.append(col[1].replace('\xa0', ' ').strip())
         
         df.columns = flat_cols
         
@@ -55,6 +55,8 @@ def parse_spotgamma_csv(uploaded_file) -> Optional[pd.DataFrame]:
             'Next Exp Delta': 'next_exp_delta',
             'Top Gamma Exp': 'top_gamma_exp',
             'Top Delta Exp': 'top_delta_exp',
+            'Next Exp Call Vol': 'next_exp_call_vol',
+            'Next Exp Put Vol': 'next_exp_put_vol',
             'Put/Call OI Ratio': 'pc_oi_ratio',
             'Volume Ratio': 'volume_ratio',
             'Gamma Ratio': 'gamma_ratio',
@@ -74,9 +76,10 @@ def parse_spotgamma_csv(uploaded_file) -> Optional[pd.DataFrame]:
         # 过滤有效行
         df = df[df['symbol'].notna()].copy()
         
-        # 清理数字列（移除引号）
+        # 清理数字列（移除引号和特殊字符）
         numeric_cols = ['price', 'zero_gamma', 'key_delta', 'hedge_wall', 'call_wall', 'put_wall',
                        'options_impact', 'call_gamma', 'put_gamma', 'next_exp_gamma', 'next_exp_delta',
+                       'next_exp_call_vol', 'next_exp_put_vol',
                        'pc_oi_ratio', 'volume_ratio', 'gamma_ratio', 'delta_ratio',
                        'ne_skew', 'skew', 'rv_1m', 'iv_1m', 'iv_rank', 'garch_rank', 'implied_move']
         
@@ -265,58 +268,118 @@ def analyze_directional_indicators(row: pd.Series) -> Dict:
 def analyze_volatility(row: pd.Series) -> Dict:
     """
     分析波动率指标
+    
+    SpotGamma定义：
+    - Skew = 25 Delta Put IV - 25 Delta Call IV
+      - 负值 = Put相对便宜，市场偏乐观
+      - 正值 = Put溢价，市场避险
+    - NE Skew = 下次到期日的短期偏斜
+    - IV > RV 且 Garch Rank低 = 期权定价偏高，适合卖方
     """
     result = {
         'iv_1m': row.get('iv_1m', 0),
         'rv_1m': row.get('rv_1m', 0),
         'iv_rank': row.get('iv_rank', 0),
+        'garch_rank': row.get('garch_rank', 0),
         'skew': row.get('skew', 0),
+        'ne_skew': row.get('ne_skew', 0),
         'implied_move': row.get('implied_move', 0),
         'iv_rv_ratio': 0,
+        'iv_rv_diff': 0,
         'iv_rv_signal': '⚪',
         'iv_rv_desc': 'IV合理',
         'skew_signal': '⚪',
         'skew_desc': '正常',
+        'ne_skew_signal': '⚪',
+        'ne_skew_desc': '正常',
         'iv_rank_signal': '⚪',
         'iv_rank_desc': '中等',
+        'garch_signal': '⚪',
+        'garch_desc': '中等',
+        'vol_regime': '中性',
+        'vol_regime_signal': '⚪',
     }
     
     iv = row.get('iv_1m', 0)
     rv = row.get('rv_1m', 0)
+    garch_rank = row.get('garch_rank', 0)
     
-    # IV vs RV 分析
+    # IV vs RV 分析 (结合Garch Rank)
     if pd.notna(iv) and pd.notna(rv) and rv > 0:
         ratio = iv / rv
+        diff = iv - rv
         result['iv_rv_ratio'] = ratio
+        result['iv_rv_diff'] = diff
         
-        if ratio > 1.3:
-            result['iv_rv_signal'] = '🔴'
-            result['iv_rv_desc'] = 'IV偏高 (可卖权)'
-        elif ratio > 1.1:
-            result['iv_rv_signal'] = '🟠'
-            result['iv_rv_desc'] = 'IV略高'
-        elif ratio < 0.8:
-            result['iv_rv_signal'] = '🟢'
-            result['iv_rv_desc'] = 'IV偏低 (可买权)'
-        elif ratio < 0.9:
-            result['iv_rv_signal'] = '🟢'
-            result['iv_rv_desc'] = 'IV略低'
+        # SpotGamma逻辑: IV > RV 且 Garch Rank低 = 期权定价偏高
+        if pd.notna(garch_rank):
+            if iv > rv and garch_rank < 0.3:
+                result['iv_rv_signal'] = '🔴'
+                result['iv_rv_desc'] = 'IV偏高+Garch低 (卖方机会)'
+                result['vol_regime'] = '波动率高估'
+                result['vol_regime_signal'] = '📉'
+            elif iv < rv and garch_rank > 0.7:
+                result['iv_rv_signal'] = '🟢'
+                result['iv_rv_desc'] = 'IV偏低+Garch高 (买方机会)'
+                result['vol_regime'] = '波动率低估'
+                result['vol_regime_signal'] = '📈'
+            elif ratio > 1.2:
+                result['iv_rv_signal'] = '🟠'
+                result['iv_rv_desc'] = 'IV略高于RV'
+            elif ratio < 0.85:
+                result['iv_rv_signal'] = '🟢'
+                result['iv_rv_desc'] = 'IV低于RV'
+            else:
+                result['iv_rv_signal'] = '⚪'
+                result['iv_rv_desc'] = 'IV合理'
         else:
-            result['iv_rv_signal'] = '⚪'
-            result['iv_rv_desc'] = 'IV合理'
+            # 没有Garch数据时的简单判断
+            if ratio > 1.3:
+                result['iv_rv_signal'] = '🔴'
+                result['iv_rv_desc'] = 'IV偏高'
+            elif ratio < 0.8:
+                result['iv_rv_signal'] = '🟢'
+                result['iv_rv_desc'] = 'IV偏低'
     
-    # Skew 分析
+    # Garch Rank 分析
+    if pd.notna(garch_rank):
+        result['garch_rank'] = garch_rank
+        if garch_rank > 0.7:
+            result['garch_signal'] = '🔴'
+            result['garch_desc'] = '波动扩张中'
+        elif garch_rank < 0.3:
+            result['garch_signal'] = '🟢'
+            result['garch_desc'] = '波动收缩中'
+        else:
+            result['garch_signal'] = '⚪'
+            result['garch_desc'] = '中等'
+    
+    # 30天 Skew 分析 (SpotGamma定义: Skew = Put IV - Call IV)
+    # 负值 = Put便宜 = 市场乐观; 正值 = Put贵 = 市场避险
     skew = row.get('skew', 0)
     if pd.notna(skew):
-        if skew < -0.2:
+        if skew > 0.15:
             result['skew_signal'] = '🔴'
-            result['skew_desc'] = 'Put溢价 (看跌偏斜)'
-        elif skew > 0.2:
+            result['skew_desc'] = 'Put溢价 (避险情绪)'
+        elif skew < -0.15:
             result['skew_signal'] = '🟢'
-            result['skew_desc'] = 'Call溢价 (看涨偏斜)'
+            result['skew_desc'] = 'Put便宜 (乐观/追涨)'
         else:
             result['skew_signal'] = '⚪'
             result['skew_desc'] = '正常'
+    
+    # NE Skew 分析 (下次到期短期偏斜)
+    ne_skew = row.get('ne_skew', 0)
+    if pd.notna(ne_skew):
+        if ne_skew > 0.15:
+            result['ne_skew_signal'] = '🔴'
+            result['ne_skew_desc'] = '短期Put溢价 (对冲需求高)'
+        elif ne_skew < -0.15:
+            result['ne_skew_signal'] = '🟢'
+            result['ne_skew_desc'] = '短期Put便宜 (短期乐观)'
+        else:
+            result['ne_skew_signal'] = '⚪'
+            result['ne_skew_desc'] = '正常'
     
     # IV Rank 分析
     iv_rank = row.get('iv_rank', 0)
@@ -400,14 +463,14 @@ def generate_full_analysis(df: pd.DataFrame) -> Dict:
         else:
             result['directional_summary']['neutral'].append(symbol)
         
-        if vol_analysis['iv_rv_desc'] == 'IV偏高 (可卖权)':
+        if 'IV偏高' in vol_analysis['iv_rv_desc'] or '卖方' in vol_analysis['iv_rv_desc']:
             result['volatility_summary']['iv_high'].append(symbol)
-        elif vol_analysis['iv_rv_desc'] == 'IV偏低 (可买权)':
+        elif 'IV偏低' in vol_analysis['iv_rv_desc'] or '买方' in vol_analysis['iv_rv_desc']:
             result['volatility_summary']['iv_low'].append(symbol)
         
-        if vol_analysis['skew_desc'] == 'Put溢价 (看跌偏斜)':
+        if vol_analysis['skew_desc'] == 'Put溢价 (避险情绪)':
             result['volatility_summary']['skew_put'].append(symbol)
-        elif vol_analysis['skew_desc'] == 'Call溢价 (看涨偏斜)':
+        elif vol_analysis['skew_desc'] == 'Put便宜 (乐观/追涨)':
             result['volatility_summary']['skew_call'].append(symbol)
         
         # 生成预警
@@ -623,26 +686,26 @@ def render_spotgamma_section(df: pd.DataFrame, st_module):
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("**IV vs RV**")
+        st.markdown("**IV vs RV + Garch**")
         iv_high = analysis['volatility_summary']['iv_high']
         iv_low = analysis['volatility_summary']['iv_low']
         
         if iv_high:
-            st.error(f"🔴 IV偏高 (可卖权): {', '.join(iv_high[:6])}")
+            st.error(f"📉 波动率高估 (卖方机会): {', '.join(iv_high[:6])}")
         if iv_low:
-            st.success(f"🟢 IV偏低 (可买权): {', '.join(iv_low[:6])}")
+            st.success(f"📈 波动率低估 (买方机会): {', '.join(iv_low[:6])}")
         if not iv_high and not iv_low:
             st.info("⚪ IV普遍合理")
     
     with col2:
-        st.markdown("**Skew 偏斜**")
+        st.markdown("**Skew 偏斜 (Put IV - Call IV)**")
         skew_put = analysis['volatility_summary']['skew_put']
         skew_call = analysis['volatility_summary']['skew_call']
         
         if skew_put:
-            st.warning(f"🔴 Put溢价 (看跌偏斜): {', '.join(skew_put[:6])}")
+            st.warning(f"🔴 Put溢价 (避险情绪): {', '.join(skew_put[:6])}")
         if skew_call:
-            st.success(f"🟢 Call溢价 (看涨偏斜): {', '.join(skew_call[:6])}")
+            st.success(f"🟢 Put便宜 (乐观/追涨): {', '.join(skew_call[:6])}")
         if not skew_put and not skew_call:
             st.info("⚪ Skew正常")
     
@@ -657,16 +720,27 @@ def render_spotgamma_section(df: pd.DataFrame, st_module):
                     '标的': sym,
                     '1M IV': f"{v['iv_1m']*100:.1f}%" if v['iv_1m'] else 'N/A',
                     '1M RV': f"{v['rv_1m']*100:.1f}%" if v['rv_1m'] else 'N/A',
-                    'IV/RV': f"{v['iv_rv_signal']} {v['iv_rv_desc']}",
+                    'IV-RV': f"{v['iv_rv_diff']*100:.1f}%" if v.get('iv_rv_diff') else 'N/A',
+                    'IV/RV判断': f"{v['iv_rv_signal']} {v['iv_rv_desc']}",
                     'IV Rank': f"{v['iv_rank']*100:.0f}%" if v['iv_rank'] else 'N/A',
-                    'IV Rank信号': f"{v['iv_rank_signal']} {v['iv_rank_desc']}",
-                    'Skew': f"{v['skew']:.3f}" if v['skew'] else 'N/A',
+                    'Garch': f"{v['garch_rank']*100:.0f}%" if v.get('garch_rank') else 'N/A',
+                    'Garch信号': f"{v.get('garch_signal', '⚪')} {v.get('garch_desc', '')}",
+                    '30D Skew': f"{v['skew']:.3f}" if v['skew'] else 'N/A',
+                    'NE Skew': f"{v.get('ne_skew', 0):.3f}" if v.get('ne_skew') else 'N/A',
                     'Skew信号': f"{v['skew_signal']} {v['skew_desc']}",
                     '隐含波动': f"±${v['implied_move']:.2f}" if v['implied_move'] else 'N/A',
                 })
         
         if vol_data:
             st.dataframe(pd.DataFrame(vol_data), use_container_width=True, hide_index=True)
+        
+        st.caption("""
+        **SpotGamma波动率逻辑:**
+        - IV > RV 且 Garch Rank低 → 期权定价偏高，适合卖方策略
+        - IV < RV 且 Garch Rank高 → 期权定价偏低，适合买方策略
+        - Skew = Put IV - Call IV: 正值=Put溢价(避险)，负值=Put便宜(乐观)
+        - NE Skew: 下次到期日的短期偏斜
+        """)
     
     # ===== 5. 风险预警 =====
     if analysis['alerts']:
