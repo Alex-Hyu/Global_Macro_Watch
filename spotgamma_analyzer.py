@@ -93,6 +93,99 @@ class SpotGammaIndicators:
 # CSV 解析函数
 # ============================================================
 
+def parse_levels_text(text: str) -> Dict[str, float]:
+    """
+    解析粘贴的关键位置文本
+    支持格式:
+    - "625  Zero Gamma"
+    - "625\tZero Gamma"
+    - "625 Zero Gamma Volatility Trigger" (多标签在同一行)
+    """
+    result = {
+        'zero_gamma': 0,
+        'call_wall': 0,
+        'put_wall': 0,
+        'volatility_trigger': 0,
+        'hedge_wall': 0,
+        'key_gamma_strike': 0,
+        'key_delta_strike': 0,
+        'large_gamma_1': 0,
+        'large_gamma_2': 0,
+        'large_gamma_3': 0,
+        'large_gamma_4': 0,
+        'combo_1': 0,
+        'combo_2': 0,
+        'combo_3': 0,
+        'combo_4': 0,
+    }
+    
+    if not text or not text.strip():
+        return result
+    
+    lines = text.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # 分割数字和标签
+        parts = line.replace('\t', ' ').split()
+        if len(parts) < 2:
+            continue
+        
+        try:
+            price = float(parts[0].replace(',', ''))
+            level_name = ' '.join(parts[1:]).lower()
+            
+            # 匹配关键位置
+            if 'zero gamma' in level_name:
+                result['zero_gamma'] = price
+            if 'call wall' in level_name:
+                result['call_wall'] = price
+            if 'put wall' in level_name:
+                result['put_wall'] = price
+            if 'volatility trigger' in level_name or 'vol trigger' in level_name:
+                result['volatility_trigger'] = price
+            if 'hedge wall' in level_name:
+                result['hedge_wall'] = price
+            if 'key gamma' in level_name:
+                result['key_gamma_strike'] = price
+            if 'key delta' in level_name:
+                result['key_delta_strike'] = price
+            
+            # Large Gamma (按数字匹配)
+            if 'large gamma 1' in level_name:
+                result['large_gamma_1'] = price
+            elif 'large gamma 2' in level_name:
+                result['large_gamma_2'] = price
+            elif 'large gamma 3' in level_name:
+                result['large_gamma_3'] = price
+            elif 'large gamma 4' in level_name:
+                result['large_gamma_4'] = price
+            elif 'large gamma' in level_name and not any(f'large gamma {i}' in level_name for i in range(1, 5)):
+                # 没有数字的 large gamma，放到第一个空位
+                if result['large_gamma_1'] == 0:
+                    result['large_gamma_1'] = price
+                elif result['large_gamma_2'] == 0:
+                    result['large_gamma_2'] = price
+            
+            # Combo (按数字匹配)
+            if 'combo 1' in level_name:
+                result['combo_1'] = price
+            elif 'combo 2' in level_name:
+                result['combo_2'] = price
+            elif 'combo 3' in level_name:
+                result['combo_3'] = price
+            elif 'combo 4' in level_name:
+                result['combo_4'] = price
+                
+        except ValueError:
+            continue
+    
+    return result
+
+
 def parse_spotgamma_csv(file) -> pd.DataFrame:
     """解析SpotGamma CSV文件"""
     try:
@@ -228,8 +321,17 @@ class SpotGammaAnalyzer:
                           zero_gamma: float = 0,
                           call_wall: float = 0, 
                           put_wall: float = 0,
-                          volatility_trigger: float = 0):
-        """手动设置关键位置"""
+                          volatility_trigger: float = 0,
+                          hedge_wall: float = 0,
+                          large_gamma_1: float = 0,
+                          large_gamma_2: float = 0,
+                          large_gamma_3: float = 0,
+                          large_gamma_4: float = 0,
+                          combo_1: float = 0,
+                          combo_2: float = 0,
+                          combo_3: float = 0,
+                          combo_4: float = 0):
+        """手动设置关键位置（覆盖CSV中的数据）"""
         if zero_gamma:
             self.levels['zero_gamma'] = zero_gamma
         if call_wall:
@@ -238,6 +340,24 @@ class SpotGammaAnalyzer:
             self.levels['put_wall'] = put_wall
         if volatility_trigger:
             self.levels['volatility_trigger'] = volatility_trigger
+        if hedge_wall:
+            self.levels['hedge_wall'] = hedge_wall
+        if large_gamma_1:
+            self.levels['large_gamma_1'] = large_gamma_1
+        if large_gamma_2:
+            self.levels['large_gamma_2'] = large_gamma_2
+        if large_gamma_3:
+            self.levels['large_gamma_3'] = large_gamma_3
+        if large_gamma_4:
+            self.levels['large_gamma_4'] = large_gamma_4
+        if combo_1:
+            self.levels['combo_1'] = combo_1
+        if combo_2:
+            self.levels['combo_2'] = combo_2
+        if combo_3:
+            self.levels['combo_3'] = combo_3
+        if combo_4:
+            self.levels['combo_4'] = combo_4
     
     def determine_gamma_environment(self) -> Tuple[GammaEnvironment, float, float]:
         """判断Gamma环境"""
@@ -564,18 +684,30 @@ def render_spotgamma_section(df: pd.DataFrame, st_module, prices: Dict[str, floa
         is_data_day = st.checkbox("今日有重要数据?", key="sg_data_day")
         data_event = st.text_input("数据事件", placeholder="CPI/PPI/FOMC", key="sg_event")
     
-    # 手动输入Zero Gamma（CSV可能没有）
-    with st.expander("📝 手动输入关键位置 (可选)", expanded=False):
-        st.caption("如果CSV中没有Zero Gamma等位置，可在此手动输入")
-        mcol1, mcol2, mcol3, mcol4 = st.columns(4)
-        with mcol1:
-            manual_zg_qqq = st.number_input("QQQ Zero Gamma", value=0.0, step=0.5, key="manual_zg_qqq")
-        with mcol2:
-            manual_cw_qqq = st.number_input("QQQ Call Wall", value=0.0, step=0.5, key="manual_cw_qqq")
-        with mcol3:
-            manual_pw_qqq = st.number_input("QQQ Put Wall", value=0.0, step=0.5, key="manual_pw_qqq")
-        with mcol4:
-            manual_vt_qqq = st.number_input("QQQ Vol Trigger", value=0.0, step=0.5, key="manual_vt_qqq")
+    # 粘贴关键位置数据
+    st.markdown("#### 📋 粘贴 QQQ 关键位置数据")
+    st.caption("从 SpotGamma 网站复制关键位置表格，粘贴到下方")
+    
+    qqq_levels_text = st.text_area(
+        "QQQ 关键位置",
+        height=200,
+        placeholder="""629.89  Combo 2
+627     Call Wall
+626.76  Combo 3
+625     Large Gamma 3
+620     Large Gamma 1
+620     Volatility Trigger
+618     Zero Gamma
+615     Large Gamma 4
+614.23  Combo 1
+610     Large Gamma 2
+610     Put Wall
+609.85  Combo 4""",
+        key="qqq_levels_paste"
+    )
+    
+    # 解析粘贴的数据
+    parsed_levels = parse_levels_text(qqq_levels_text) if qqq_levels_text else {}
     
     # 分析主要标的
     analysis_results = {}
@@ -589,14 +721,27 @@ def render_spotgamma_section(df: pd.DataFrame, st_module, prices: Dict[str, floa
             analyzer.is_data_day = is_data_day
             analyzer.data_event = data_event
             
-            # 应用手动输入的位置
-            if ticker == 'QQQ':
+            # 应用粘贴的位置数据 (仅QQQ)
+            if ticker == 'QQQ' and parsed_levels:
                 analyzer.set_manual_levels(
-                    zero_gamma=manual_zg_qqq if manual_zg_qqq > 0 else 0,
-                    call_wall=manual_cw_qqq if manual_cw_qqq > 0 else 0,
-                    put_wall=manual_pw_qqq if manual_pw_qqq > 0 else 0,
-                    volatility_trigger=manual_vt_qqq if manual_vt_qqq > 0 else 0
+                    zero_gamma=parsed_levels.get('zero_gamma', 0),
+                    call_wall=parsed_levels.get('call_wall', 0),
+                    put_wall=parsed_levels.get('put_wall', 0),
+                    volatility_trigger=parsed_levels.get('volatility_trigger', 0),
+                    large_gamma_1=parsed_levels.get('large_gamma_1', 0),
+                    large_gamma_2=parsed_levels.get('large_gamma_2', 0),
+                    large_gamma_3=parsed_levels.get('large_gamma_3', 0),
+                    large_gamma_4=parsed_levels.get('large_gamma_4', 0),
+                    combo_1=parsed_levels.get('combo_1', 0),
+                    combo_2=parsed_levels.get('combo_2', 0),
+                    combo_3=parsed_levels.get('combo_3', 0),
+                    combo_4=parsed_levels.get('combo_4', 0),
                 )
+                # 显示解析结果
+                with st.expander("✅ 已解析的关键位置", expanded=False):
+                    for k, v in sorted(parsed_levels.items(), key=lambda x: -x[1] if x[1] else 0):
+                        if v:
+                            st.markdown(f"- **{k}**: ${v:.2f}")
             
             result = analyzer.get_full_analysis()
             analysis_results[ticker] = result
@@ -653,24 +798,80 @@ def render_single_stock_analysis(st, result: Dict, expanded: bool = True, show_h
         risk_delta = "⚠️" if risk in [RiskLevel.HIGH, RiskLevel.EXTREME] else ""
         st.metric("风险等级", risk.value, delta=risk_delta)
     
-    # 关键位置
-    st.markdown("#### 📍 关键位置")
+    # 关键位置图谱
+    st.markdown("#### 📍 关键位置图谱")
     levels = result['levels']
+    current_price = result['current_price']
     
-    level_cols = st.columns(5)
-    level_items = [
-        ('Zero Gamma / Hedge Wall', levels.get('zero_gamma', 0) or levels.get('hedge_wall', 0)),
+    # 构建所有位置列表
+    all_positions = []
+    position_mapping = {
+        'call_wall': ('Call Wall', '🔺'),
+        'zero_gamma': ('Zero Gamma', '⚡'),
+        'put_wall': ('Put Wall', '🔻'),
+        'hedge_wall': ('Hedge Wall', '🛡️'),
+        'volatility_trigger': ('Vol Trigger', '⚡'),
+        'key_gamma_strike': ('Key Gamma', '🎯'),
+        'key_delta_strike': ('Key Delta', '🎯'),
+        'large_gamma_1': ('LG1', '⬤'),
+        'large_gamma_2': ('LG2', '⬤'),
+        'large_gamma_3': ('LG3', '⬤'),
+        'large_gamma_4': ('LG4', '⬤'),
+        'combo_1': ('Combo1', '◆'),
+        'combo_2': ('Combo2', '◆'),
+        'combo_3': ('Combo3', '◆'),
+        'combo_4': ('Combo4', '◆'),
+    }
+    
+    for key, (name, emoji) in position_mapping.items():
+        value = levels.get(key, 0)
+        if value and value > 0:
+            all_positions.append({
+                'price': value,
+                'name': name,
+                'emoji': emoji,
+                'key': key
+            })
+    
+    # 添加当前价格
+    all_positions.append({
+        'price': current_price,
+        'name': '★ 现价',
+        'emoji': '★',
+        'key': 'current'
+    })
+    
+    # 按价格排序（高到低）
+    all_positions.sort(key=lambda x: x['price'], reverse=True)
+    
+    # 显示位置图谱
+    st.markdown("```")
+    for pos in all_positions:
+        dist = pos['price'] - current_price
+        dist_str = f"+{dist:.2f}" if dist > 0 else f"{dist:.2f}" if dist != 0 else ""
+        
+        if pos['key'] == 'current':
+            st.markdown(f"  {pos['price']:.2f}  {pos['emoji']} {pos['name']}")
+        elif pos['key'] in ['call_wall', 'zero_gamma', 'put_wall']:
+            # 重要位置高亮
+            st.markdown(f"  {pos['price']:.2f}  {pos['emoji']} **{pos['name']}** ({dist_str})")
+        else:
+            st.markdown(f"  {pos['price']:.2f}  {pos['emoji']} {pos['name']} ({dist_str})")
+    st.markdown("```")
+    
+    # 核心位置卡片
+    level_cols = st.columns(4)
+    core_levels = [
+        ('Zero Gamma', levels.get('zero_gamma', 0)),
         ('Call Wall', levels.get('call_wall', 0)),
         ('Put Wall', levels.get('put_wall', 0)),
-        ('Key Gamma Strike', levels.get('key_gamma_strike', 0)),
-        ('Key Delta Strike', levels.get('key_delta_strike', 0)),
+        ('Vol Trigger', levels.get('volatility_trigger', 0)),
     ]
     
-    for i, (name, value) in enumerate(level_items):
+    for i, (name, value) in enumerate(core_levels):
         with level_cols[i]:
             if value:
-                # 计算与当前价格的距离
-                dist = value - result['current_price']
+                dist = value - current_price
                 dist_str = f"+{dist:.1f}" if dist > 0 else f"{dist:.1f}"
                 st.metric(name, f"${value:.0f}", delta=dist_str)
             else:
