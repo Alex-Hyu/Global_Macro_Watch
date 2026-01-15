@@ -1,904 +1,769 @@
 """
-SpotGamma 期权数据分析模块 V2
-整合了地形分析、动力学分析、情绪分析、波动率分析
+SpotGamma 分析模块 - 宏观战情室 V2
+整合官方指标定义和增强分析功能
 
-使用方法:
-1. 从SpotGamma导出CSV (Data Table)
-2. 在Streamlit侧边栏上传CSV
-3. 自动解析并显示分析结果
+官方指标定义:
+- Key Gamma Strike: 最大Gamma头寸行权价（磁吸效应）
+- Hedge Wall: 做市商风险暴露变化位（上方均值回归，下方高波动）
+- Volume Ratio: ATM Put Delta与Call Delta成交量比（非传统P/C Vol）
+- Options Implied Move: 美元值（非百分比）
+- Next Exp Gamma >25%: 短期头寸集中，到期前后易剧烈波动
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, List, Tuple, Dict, Any
+from enum import Enum
+from datetime import datetime, date
+import re
+import io
 
 
-def parse_spotgamma_csv(uploaded_file) -> Optional[pd.DataFrame]:
-    """
-    解析SpotGamma CSV文件
+# ============================================================
+# 数据结构定义
+# ============================================================
+
+class GammaEnvironment(Enum):
+    """Gamma环境类型"""
+    POSITIVE = "正Gamma"
+    NEGATIVE = "负Gamma"
+    NEUTRAL = "中性"
+
+
+class MarketBias(Enum):
+    """市场偏向"""
+    BULLISH = "偏多"
+    BEARISH = "偏空"
+    NEUTRAL = "中性"
+
+
+class RiskLevel(Enum):
+    """风险等级"""
+    LOW = "低"
+    MEDIUM = "中"
+    HIGH = "高"
+    EXTREME = "极端"
+
+
+@dataclass
+class GammaLevels:
+    """Gamma关键位置数据"""
+    zero_gamma: float = 0
+    call_wall: float = 0
+    put_wall: float = 0
+    volatility_trigger: float = 0
+    hedge_wall: float = 0
+    key_gamma_strike: float = 0
+    key_delta_strike: float = 0
+    large_gamma_1: float = 0
+    large_gamma_2: float = 0
+    large_gamma_3: float = 0
+    large_gamma_4: float = 0
+
+
+@dataclass
+class SpotGammaIndicators:
+    """SpotGamma方向性和波动性指标"""
+    # 方向性指标
+    delta_ratio: float = -1.0       # Put Delta ÷ Call Delta（负值）
+    gamma_ratio: float = 1.0        # Put Gamma ÷ Call Gamma
+    put_call_oi_ratio: float = 1.0  # Put OI ÷ Call OI
+    volume_ratio: float = 1.0       # ATM Put Delta vs Call Delta成交量比
     
-    Args:
-        uploaded_file: Streamlit上传的文件对象或文件路径
-        
-    Returns:
-        解析后的DataFrame，失败返回None
-    """
+    # 波动性指标
+    options_implied_move: float = 0  # 美元值！非百分比
+    iv_rank: float = 50              # IV百分位 (0-100)
+    one_month_iv: float = 0          # 1个月隐含波动率
+    one_month_rv: float = 0          # 1个月实际波动率
+    skew: float = 0                  # 偏度
+    ne_skew: float = 0               # 近期偏度
+    
+    # 期权影响
+    options_impact: float = 0        # 期权驱动股价程度 (0-1)
+    
+    # 到期集中度
+    next_exp_gamma_pct: float = 0    # 下次到期Gamma占比
+    next_exp_delta_pct: float = 0    # 下次到期Delta占比
+    top_gamma_exp: str = ""          # 最大Gamma到期日
+    top_delta_exp: str = ""          # 最大Delta到期日
+
+
+# ============================================================
+# CSV 解析函数
+# ============================================================
+
+def parse_spotgamma_csv(file) -> pd.DataFrame:
+    """解析SpotGamma CSV文件"""
     try:
-        # 使用skiprows=1跳过合并的表头行
-        df = pd.read_csv(uploaded_file, skiprows=1)
+        # 支持文件对象或路径
+        if hasattr(file, 'read'):
+            file.seek(0)
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_csv(file)
         
-        # 清理列名中的特殊字符和空格
-        df.columns = [c.strip().replace('\xa0', ' ') for c in df.columns]
-        
-        # 标准化列名映射
-        col_mapping = {
-            'Symbol': 'symbol',
-            'Current Price': 'price',
-            'Stock Volume': 'volume',
-            'Earnings Date': 'earnings_date',
-            'Key Gamma Strike': 'zero_gamma',
-            'Key Delta Strike': 'key_delta',
-            'Hedge Wall': 'hedge_wall',
-            'Call Wall': 'call_wall',
-            'Put Wall': 'put_wall',
-            'Options Impact': 'options_impact',
-            'Call Gamma': 'call_gamma',
-            'Put Gamma': 'put_gamma',
-            'Next Exp Gamma': 'next_exp_gamma',
-            'Next Exp Delta': 'next_exp_delta',
-            'Top Gamma Exp': 'top_gamma_exp',
-            'Top Delta Exp': 'top_delta_exp',
-            'Next Exp Call Vol': 'next_exp_call_vol',
-            'Next Exp Put Vol': 'next_exp_put_vol',
-            'Put/Call OI Ratio': 'pc_oi_ratio',
-            'Volume Ratio': 'volume_ratio',
-            'Gamma Ratio': 'gamma_ratio',
-            'Delta Ratio': 'delta_ratio',
-            'NE Skew': 'ne_skew',
-            'Skew': 'skew',
-            '1 M RV': 'rv_1m',
-            '1 M IV': 'iv_1m',
-            'IV Rank': 'iv_rank',
-            'Garch Rank': 'garch_rank',
-            'Options Implied Move': 'implied_move',
-        }
-        
-        # 重命名列
-        df = df.rename(columns=col_mapping)
-        
-        # 过滤有效行
-        df = df[df['symbol'].notna()].copy()
-        
-        # 处理带有引号的数值字符串 (如 '-2.4685)
-        quote_cols = ['delta_ratio', 'gamma_ratio', 'skew', 'ne_skew', 'call_gamma', 'put_gamma']
-        for col in quote_cols:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.replace("'", "").astype(float)
-        
-        # 转换其他数值列
-        numeric_cols = ['price', 'zero_gamma', 'key_delta', 'hedge_wall', 'call_wall', 'put_wall',
-                       'options_impact', 'next_exp_gamma', 'next_exp_delta',
-                       'next_exp_call_vol', 'next_exp_put_vol',
-                       'pc_oi_ratio', 'volume_ratio',
-                       'rv_1m', 'iv_1m', 'iv_rank', 'garch_rank', 'implied_move']
-        
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        # 清理列名（去除空格和特殊字符）
+        df.columns = df.columns.str.strip()
         
         return df
-        
     except Exception as e:
-        print(f"SpotGamma CSV解析失败: {e}")
-        return None
+        print(f"CSV解析错误: {e}")
+        return pd.DataFrame()
 
 
-def analyze_geography(row: pd.Series) -> Dict:
-    """
-    地形分析 (Geography)
-    分析价格相对于关键位的位置
+def extract_stock_data(df: pd.DataFrame, ticker: str) -> Tuple[Optional[Dict], Optional[SpotGammaIndicators]]:
+    """从DataFrame中提取特定股票的数据"""
+    if df.empty:
+        return None, None
     
-    使用Hedge Wall判定Gamma环境（比Key Gamma Strike更准确）
-    """
-    result = {
-        'symbol': row.get('symbol', 'N/A'),
-        'price': row.get('price', 0),
-        'zero_gamma': row.get('zero_gamma', 0),
-        'hedge_wall': row.get('hedge_wall', 0),
-        'call_wall': row.get('call_wall', 0),
-        'put_wall': row.get('put_wall', 0),
-        'gamma_env': 'N/A',
-        'gamma_env_emoji': '⚪',
-        'gamma_env_desc': '',
-        'dist_to_call_wall': 0,
-        'dist_to_put_wall': 0,
-        'dist_to_hedge_wall': 0,
-        'dist_to_zero_gamma': 0,
-        'position_zone': '中性区',
-    }
+    # 查找ticker列
+    ticker_col = None
+    for col in df.columns:
+        if col.lower() in ['ticker', 'symbol', 'stock']:
+            ticker_col = col
+            break
     
-    price = row.get('price', 0)
-    hedge_wall = row.get('hedge_wall', 0)
-    call_wall = row.get('call_wall', 0)
-    put_wall = row.get('put_wall', 0)
-    zero_gamma = row.get('zero_gamma', 0)
+    if ticker_col is None:
+        # 假设第一列是ticker
+        ticker_col = df.columns[0]
     
-    if pd.isna(price) or price == 0:
-        return result
+    # 筛选股票
+    row = df[df[ticker_col].str.upper() == ticker.upper()]
     
-    # 使用Hedge Wall判定Gamma环境（更准确）
-    if pd.notna(hedge_wall) and hedge_wall > 0:
-        if price > hedge_wall:
-            result['gamma_env'] = '正Gamma'
-            result['gamma_env_emoji'] = '✅'
-            result['gamma_env_desc'] = '稳定/买入回调'
-        else:
-            result['gamma_env'] = '负Gamma'
-            result['gamma_env_emoji'] = '⚠️'
-            result['gamma_env_desc'] = '剧烈/易踩踏'
+    if row.empty:
+        return None, None
+    
+    row = row.iloc[0].to_dict()
+    
+    # 解析关键位置
+    levels = {}
+    indicators = SpotGammaIndicators()
+    
+    # 提取价格信息
+    for col, key in [
+        ('Key Gamma Strike', 'key_gamma_strike'),
+        ('Key Delta Strike', 'key_delta_strike'),
+        ('Hedge Wall', 'hedge_wall'),
+        ('Call Wall', 'call_wall'),
+        ('Put Wall', 'put_wall'),
+    ]:
+        if col in row:
+            try:
+                levels[key] = float(row[col]) if row[col] else 0
+            except:
+                levels[key] = 0
+    
+    # 辅助函数：解析百分比
+    def parse_pct(val):
+        if pd.isna(val) or val == '':
+            return 0
+        if isinstance(val, str):
+            return float(val.replace('%', '').replace(',', ''))
+        return float(val)
+    
+    # 辅助函数：解析数字
+    def parse_num(val):
+        if pd.isna(val) or val == '':
+            return 0
+        if isinstance(val, str):
+            val = val.replace(',', '').replace('$', '')
+        try:
+            return float(val)
+        except:
+            return 0
+    
+    # 提取指标
+    indicators.delta_ratio = parse_num(row.get('Delta Ratio', -1))
+    indicators.gamma_ratio = parse_num(row.get('Gamma Ratio', 1))
+    indicators.put_call_oi_ratio = parse_num(row.get('Put/Call OI Ratio', row.get('Put/Call OI\xa0Ratio', 1)))
+    indicators.volume_ratio = parse_num(row.get('Volume Ratio', 1))
+    
+    indicators.options_implied_move = parse_num(row.get('Options Implied Move', 0))
+    indicators.iv_rank = parse_pct(row.get('IV Rank', 50))
+    indicators.one_month_iv = parse_pct(row.get('1 M IV', row.get('1M IV', 0)))
+    indicators.one_month_rv = parse_pct(row.get('1 M RV', row.get('1M RV', 0)))
+    indicators.skew = parse_pct(row.get('Skew', 0))
+    indicators.ne_skew = parse_pct(row.get('NE Skew', 0))
+    
+    indicators.options_impact = parse_num(row.get('Options Impact', 0))
+    indicators.next_exp_gamma_pct = parse_pct(row.get('Next Exp Gamma', 0))
+    indicators.next_exp_delta_pct = parse_pct(row.get('Next Exp Delta', 0))
+    indicators.top_gamma_exp = str(row.get('Top Gamma Exp', ''))
+    indicators.top_delta_exp = str(row.get('Top Delta Exp', ''))
+    
+    return levels, indicators
+
+
+# ============================================================
+# 分析引擎
+# ============================================================
+
+class SpotGammaAnalyzer:
+    """SpotGamma 分析器"""
+    
+    def __init__(self, ticker: str = "QQQ"):
+        self.ticker = ticker
+        self.current_price: float = 0
+        self.previous_close: float = 0
+        self.levels: Dict = {}
+        self.indicators: SpotGammaIndicators = SpotGammaIndicators()
+        self.is_friday: bool = date.today().weekday() == 4
+        self.is_data_day: bool = False
+        self.data_event: str = ""
+    
+    def load_from_csv(self, df: pd.DataFrame, current_price: float, previous_close: float = 0):
+        """从CSV DataFrame加载数据"""
+        levels, indicators = extract_stock_data(df, self.ticker)
         
-        result['dist_to_hedge_wall'] = ((price - hedge_wall) / price) * 100
-    
-    # 距离关键位计算
-    if pd.notna(call_wall) and call_wall > 0:
-        result['dist_to_call_wall'] = ((call_wall - price) / price) * 100
-    
-    if pd.notna(put_wall) and put_wall > 0:
-        result['dist_to_put_wall'] = ((price - put_wall) / price) * 100
-    
-    if pd.notna(zero_gamma) and zero_gamma > 0:
-        result['dist_to_zero_gamma'] = ((price - zero_gamma) / price) * 100
-    
-    # 判定位置区域
-    dist_cw = result['dist_to_call_wall']
-    dist_pw = result['dist_to_put_wall']
-    
-    if dist_cw < 0:
-        result['position_zone'] = '真空突破区'  # 已突破Call Wall
-    elif dist_cw < 1.5:
-        result['position_zone'] = 'Call Wall阻力区'
-    elif dist_pw < 1.5:
-        result['position_zone'] = 'Put Wall支撑区'
-    elif dist_pw < 0:
-        result['position_zone'] = '下行陷阱区'  # 已跌破Put Wall
-    else:
-        result['position_zone'] = '安全区间'
-    
-    return result
-
-
-def analyze_dynamics(row: pd.Series, geography: Dict) -> Dict:
-    """
-    动力学分析 (Dynamics)
-    分析磁吸效应和悬崖风险
-    """
-    result = {
-        'pinning_strength': '弱',
-        'pinning_emoji': '⚪',
-        'pinning_target': 0,
-        'cliff_risk': '低',
-        'cliff_emoji': '🟢',
-        'next_exp_gamma': 0,
-        'top_gamma_exp': row.get('top_gamma_exp', ''),
-    }
-    
-    price = row.get('price', 0)
-    zero_gamma = row.get('zero_gamma', 0)
-    next_exp_gamma = row.get('next_exp_gamma', 0)
-    
-    if pd.isna(price) or price == 0:
-        return result
-    
-    # 磁吸效应 (Pinning) - 距离Key Gamma Strike
-    if pd.notna(zero_gamma) and zero_gamma > 0:
-        dist_to_ks = abs(price - zero_gamma) / price * 100
-        result['pinning_target'] = zero_gamma
+        if levels:
+            self.levels = levels
+        if indicators:
+            self.indicators = indicators
         
-        if dist_to_ks < 0.5:
-            result['pinning_strength'] = '极强'
-            result['pinning_emoji'] = '🧲'
-        elif dist_to_ks < 1.0:
-            result['pinning_strength'] = '强'
-            result['pinning_emoji'] = '🔴'
-        elif dist_to_ks < 1.5:
-            result['pinning_strength'] = '中等'
-            result['pinning_emoji'] = '🟠'
-        else:
-            result['pinning_strength'] = '弱'
-            result['pinning_emoji'] = '⚪'
+        self.current_price = current_price
+        self.previous_close = previous_close or current_price
     
-    # 悬崖风险 (Cliff Risk) - Next Exp Gamma
-    if pd.notna(next_exp_gamma):
-        result['next_exp_gamma'] = next_exp_gamma
+    def set_manual_levels(self, 
+                          zero_gamma: float = 0,
+                          call_wall: float = 0, 
+                          put_wall: float = 0,
+                          volatility_trigger: float = 0):
+        """手动设置关键位置"""
+        if zero_gamma:
+            self.levels['zero_gamma'] = zero_gamma
+        if call_wall:
+            self.levels['call_wall'] = call_wall
+        if put_wall:
+            self.levels['put_wall'] = put_wall
+        if volatility_trigger:
+            self.levels['volatility_trigger'] = volatility_trigger
+    
+    def determine_gamma_environment(self) -> Tuple[GammaEnvironment, float, float]:
+        """判断Gamma环境"""
+        zg = self.levels.get('zero_gamma', 0) or self.levels.get('hedge_wall', 0)
         
-        if next_exp_gamma > 0.4:
-            result['cliff_risk'] = '极高'
-            result['cliff_emoji'] = '🚨'
-        elif next_exp_gamma > 0.3:
-            result['cliff_risk'] = '高'
-            result['cliff_emoji'] = '🔴'
-        elif next_exp_gamma > 0.2:
-            result['cliff_risk'] = '中等'
-            result['cliff_emoji'] = '🟠'
-        else:
-            result['cliff_risk'] = '低'
-            result['cliff_emoji'] = '🟢'
-    
-    return result
-
-
-def analyze_sentiment(row: pd.Series, geography: Dict) -> Dict:
-    """
-    情绪与压力分析 (Sentiment)
-    分析方向性指标和交易信号
-    """
-    result = {
-        'delta_ratio': row.get('delta_ratio', 0),
-        'delta_signal': '⚪',
-        'delta_desc': '中性',
-        'gamma_ratio': row.get('gamma_ratio', 0),
-        'gamma_signal': '⚪',
-        'gamma_desc': '均衡',
-        'pc_oi_ratio': row.get('pc_oi_ratio', 0),
-        'pc_signal': '⚪',
-        'pc_desc': '中性',
-        'volume_ratio': row.get('volume_ratio', 0),
-        'composite_score': 0,
-        'composite_signal': '⚪',
-        'composite_desc': '中性',
-        'active_signals': [],
-    }
-    
-    delta_ratio = row.get('delta_ratio', 0)
-    gamma_ratio = row.get('gamma_ratio', 0)
-    pc_ratio = row.get('pc_oi_ratio', 0)
-    volume_ratio = row.get('volume_ratio', 0)
-    
-    dist_cw = geography.get('dist_to_call_wall', 0)
-    dist_pw = geography.get('dist_to_put_wall', 0)
-    gamma_env = geography.get('gamma_env', '')
-    
-    # Delta Ratio 分析
-    if pd.notna(delta_ratio):
-        if delta_ratio > -0.8:
-            result['delta_signal'] = '🟢'
-            result['delta_desc'] = '偏多'
-            delta_score = 30
-        elif delta_ratio > -1.5:
-            result['delta_signal'] = '⚪'
-            result['delta_desc'] = '中性'
-            delta_score = 0
-        elif delta_ratio > -3:
-            result['delta_signal'] = '🟠'
-            result['delta_desc'] = '偏空'
-            delta_score = -30
-        else:
-            result['delta_signal'] = '🔴'
-            result['delta_desc'] = '强烈偏空'
-            delta_score = -60
-    else:
-        delta_score = 0
-    
-    # Gamma Ratio 分析
-    if pd.notna(gamma_ratio):
-        if gamma_ratio < 1:
-            result['gamma_signal'] = '🟢'
-            result['gamma_desc'] = '上涨加速'
-            gamma_score = 20
-        elif gamma_ratio <= 2:
-            result['gamma_signal'] = '⚪'
-            result['gamma_desc'] = '均衡'
-            gamma_score = 0
-        else:
-            result['gamma_signal'] = '🔴'
-            result['gamma_desc'] = '下跌加速'
-            gamma_score = -30
-    else:
-        gamma_score = 0
-    
-    # P/C OI Ratio 分析
-    if pd.notna(pc_ratio):
-        if pc_ratio < 0.7:
-            result['pc_signal'] = '🟢'
-            result['pc_desc'] = '偏多'
-            pc_score = 20
-        elif pc_ratio <= 1.5:
-            result['pc_signal'] = '⚪'
-            result['pc_desc'] = '中性'
-            pc_score = 0
-        else:
-            result['pc_signal'] = '🔴'
-            result['pc_desc'] = '偏空'
-            pc_score = -20
-    else:
-        pc_score = 0
-    
-    # 综合评分
-    composite = delta_score + gamma_score + pc_score
-    result['composite_score'] = composite
-    
-    if composite > 30:
-        result['composite_signal'] = '🟢'
-        result['composite_desc'] = '看多'
-    elif composite > 0:
-        result['composite_signal'] = '🟢'
-        result['composite_desc'] = '轻度看多'
-    elif composite > -30:
-        result['composite_signal'] = '⚪'
-        result['composite_desc'] = '中性'
-    elif composite > -60:
-        result['composite_signal'] = '🟠'
-        result['composite_desc'] = '轻度看空'
-    else:
-        result['composite_signal'] = '🔴'
-        result['composite_desc'] = '强烈看空'
-    
-    # ===== 交易信号检测 =====
-    signals = []
-    
-    # 1. 做市商Short Put回补反弹信号
-    if pd.notna(volume_ratio) and pd.notna(delta_ratio):
-        if volume_ratio > 1.2 and delta_ratio < -2 and dist_pw > 1:
-            signals.append({
-                'type': 'rebound',
-                'emoji': '📈',
-                'title': '潜在反弹',
-                'desc': '做市商Short Put压力，到期后有回补买盘'
-            })
-    
-    # 2. Call Wall突破信号
-    if dist_cw < 0 and gamma_env == '正Gamma':
-        signals.append({
-            'type': 'breakout',
-            'emoji': '🚀',
-            'title': '真空区突破',
-            'desc': '已冲破Call Wall，做市商从阻力变推力'
-        })
-    
-    # 3. 下行陷阱警告
-    if dist_pw < 1 or dist_pw < 0:
-        signals.append({
-            'type': 'trap',
-            'emoji': '⚠️',
-            'title': '下行危险',
-            'desc': '逼近/跌破Put Wall，警惕Gamma Trap加速下跌'
-        })
-    
-    # 4. Call Wall强阻力
-    if 0 < dist_cw < 1.5:
-        signals.append({
-            'type': 'resistance',
-            'emoji': '🛑',
-            'title': 'Call Wall阻力',
-            'desc': f'距Call Wall仅{dist_cw:.1f}%，减仓或做空机会'
-        })
-    
-    # 5. Put Wall支撑
-    if 0 < dist_pw < 2:
-        signals.append({
-            'type': 'support',
-            'emoji': '🛡️',
-            'title': 'Put Wall支撑',
-            'desc': f'距Put Wall仅{dist_pw:.1f}%，观察反弹机会'
-        })
-    
-    result['active_signals'] = signals
-    
-    return result
-
-
-def analyze_volatility(row: pd.Series) -> Dict:
-    """
-    波动率分析 (Volatility)
-    
-    SpotGamma定义：
-    - Skew = 25 Delta Put IV - 25 Delta Call IV
-      - 负值 = Put相对便宜，市场偏乐观
-      - 正值 = Put溢价，市场避险
-    - IV > RV 且 Garch Rank低 = 期权定价偏高，适合卖方
-    """
-    result = {
-        'iv_1m': row.get('iv_1m', 0),
-        'rv_1m': row.get('rv_1m', 0),
-        'iv_rank': row.get('iv_rank', 0),
-        'garch_rank': row.get('garch_rank', 0),
-        'skew': row.get('skew', 0),
-        'ne_skew': row.get('ne_skew', 0),
-        'implied_move': row.get('implied_move', 0),
-        'iv_rv_spread': 0,
-        'vol_edge': '',
-        'vol_edge_emoji': '⚪',
-        'skew_signal': '⚪',
-        'skew_desc': '正常',
-        'ne_skew_signal': '⚪',
-        'ne_skew_desc': '正常',
-        'garch_warning': False,
-    }
-    
-    iv = row.get('iv_1m', 0)
-    rv = row.get('rv_1m', 0)
-    garch_rank = row.get('garch_rank', 0)
-    
-    # IV vs RV 分析 (结合Garch Rank)
-    if pd.notna(iv) and pd.notna(rv):
-        spread = iv - rv
-        result['iv_rv_spread'] = spread
+        if not zg or not self.current_price:
+            return GammaEnvironment.NEUTRAL, 0, 0
         
-        if spread > 0.02:
-            result['vol_edge'] = '期权高估 (适合卖)'
-            result['vol_edge_emoji'] = '📉'
-        elif spread < -0.02:
-            result['vol_edge'] = '期权低估 (适合买)'
-            result['vol_edge_emoji'] = '📈'
+        distance = self.current_price - zg
+        distance_pct = (distance / self.current_price) * 100
+        
+        if distance > 0:
+            return GammaEnvironment.POSITIVE, distance, distance_pct
+        elif distance < 0:
+            return GammaEnvironment.NEGATIVE, distance, distance_pct
         else:
-            result['vol_edge'] = '定价合理'
-            result['vol_edge_emoji'] = '⚪'
-        
-        # Garch Rank极低警告
-        if pd.notna(garch_rank) and garch_rank < 0.1:
-            result['garch_warning'] = True
-            result['vol_edge'] += ' | ⚠️统计波动极低，警惕爆发'
+            return GammaEnvironment.NEUTRAL, 0, 0
     
-    # 30天 Skew 分析
-    skew = row.get('skew', 0)
-    if pd.notna(skew):
-        if skew > 0.15:
-            result['skew_signal'] = '🔴'
-            result['skew_desc'] = 'Put溢价 (避险)'
-        elif skew < -0.15:
-            result['skew_signal'] = '🟢'
-            result['skew_desc'] = 'Put便宜 (乐观)'
+    def analyze_delta_ratio(self) -> Tuple[MarketBias, str]:
+        """
+        分析Delta Ratio
+        官方定义: Put Delta ÷ Call Delta（负值）
+        > -1.0 = 偏多 | -1 to -2 = 中性 | < -2.0 = 偏空 | < -3.0 = 强烈偏空
+        """
+        dr = self.indicators.delta_ratio
+        
+        if dr > -1.0:
+            return MarketBias.BULLISH, f"Delta Ratio {dr:.2f} > -1: Call Delta主导，偏多"
+        elif -2.0 <= dr <= -1.0:
+            return MarketBias.NEUTRAL, f"Delta Ratio {dr:.2f}: 中性区间"
+        elif -3.0 <= dr < -2.0:
+            return MarketBias.BEARISH, f"Delta Ratio {dr:.2f} < -2: 偏空"
         else:
-            result['skew_signal'] = '⚪'
-            result['skew_desc'] = '正常'
+            return MarketBias.BEARISH, f"Delta Ratio {dr:.2f} < -3: 强烈偏空！"
     
-    # NE Skew 分析
-    ne_skew = row.get('ne_skew', 0)
-    if pd.notna(ne_skew):
-        if ne_skew > 0.15:
-            result['ne_skew_signal'] = '🔴'
-            result['ne_skew_desc'] = '短期对冲需求高'
-        elif ne_skew < -0.15:
-            result['ne_skew_signal'] = '🟢'
-            result['ne_skew_desc'] = '短期乐观'
+    def analyze_gamma_ratio(self) -> Tuple[MarketBias, str]:
+        """
+        分析Gamma Ratio
+        官方定义: Put Gamma ÷ Call Gamma
+        < 1.0 = Call Gamma主导(上涨加速) | = 1.0 均衡 | > 2.0 = Put Gamma主导(下跌加速)
+        """
+        gr = self.indicators.gamma_ratio
+        
+        if gr < 1.0:
+            return MarketBias.BULLISH, f"Gamma Ratio {gr:.2f} < 1: Call Gamma主导，上涨加速"
+        elif 1.0 <= gr <= 2.0:
+            return MarketBias.NEUTRAL, f"Gamma Ratio {gr:.2f}: 均衡区间"
         else:
-            result['ne_skew_signal'] = '⚪'
-            result['ne_skew_desc'] = '正常'
+            return MarketBias.BEARISH, f"Gamma Ratio {gr:.2f} > 2: Put Gamma主导，下跌加速"
     
-    return result
-
-
-def derive_conclusion(geography: Dict, dynamics: Dict, sentiment: Dict, volatility: Dict) -> Dict:
-    """
-    综合结论与操作建议
-    """
-    result = {
-        'action': '观望',
-        'action_emoji': '⏸️',
-        'reason': '',
-        'confidence': '中',
-    }
-    
-    dist_cw = geography.get('dist_to_call_wall', 0)
-    dist_pw = geography.get('dist_to_put_wall', 0)
-    gamma_env = geography.get('gamma_env', '')
-    next_exp_gamma = dynamics.get('next_exp_gamma', 0)
-    cliff_risk = dynamics.get('cliff_risk', '')
-    composite_score = sentiment.get('composite_score', 0)
-    
-    # 优先级判断
-    
-    # 1. Call Wall强阻力
-    if -1 < dist_cw < 1:
-        result['action'] = '减仓/做空'
-        result['action_emoji'] = '📉'
-        result['reason'] = '触及Call Wall强阻力'
-        result['confidence'] = '高'
-        return result
-    
-    # 2. Put Wall支撑
-    if -1 < dist_pw < 1:
-        result['action'] = '博反弹'
-        result['action_emoji'] = '📈'
-        result['reason'] = '触及Put Wall支撑'
-        result['confidence'] = '中'
-        return result
-    
-    # 3. 大量Gamma即将释放
-    if next_exp_gamma and next_exp_gamma > 0.4:
-        result['action'] = '观望/等待'
-        result['action_emoji'] = '⏸️'
-        result['reason'] = '大量Gamma即将释放，周后有方向选择'
-        result['confidence'] = '中'
-        return result
-    
-    # 4. 负Gamma环境
-    if gamma_env == '负Gamma':
-        result['action'] = '防御/轻仓'
-        result['action_emoji'] = '🛡️'
-        result['reason'] = '负Gamma环境，波动将放大'
-        result['confidence'] = '高'
-        return result
-    
-    # 5. 正Gamma + 方向偏空
-    if gamma_env == '正Gamma' and composite_score < -30:
-        result['action'] = '谨慎做多'
-        result['action_emoji'] = '⚠️'
-        result['reason'] = '正Gamma但方向偏空，等待确认'
-        result['confidence'] = '低'
-        return result
-    
-    # 6. 安全区间
-    if gamma_env == '正Gamma' and dist_cw > 2 and dist_pw > 2:
-        result['action'] = '持有/做多'
-        result['action_emoji'] = '✅'
-        result['reason'] = '地形安全，阻力尚远'
-        result['confidence'] = '中'
-        return result
-    
-    return result
-
-
-def generate_full_analysis(df: pd.DataFrame) -> Dict:
-    """
-    生成完整的SpotGamma分析报告
-    """
-    result = {
-        'symbols': [],
-        'gamma_summary': {
-            'positive_gamma': [],
-            'negative_gamma': [],
-        },
-        'sentiment_summary': {
-            'bullish': [],
-            'bearish': [],
-            'neutral': [],
-        },
-        'volatility_summary': {
-            'sell_vol': [],
-            'buy_vol': [],
-            'skew_fear': [],
-            'skew_greed': [],
-        },
-        'alerts': [],
-        'analysis_by_symbol': {},
-    }
-    
-    for _, row in df.iterrows():
-        symbol = row.get('symbol', 'N/A')
-        if pd.isna(symbol) or symbol == 'N/A':
-            continue
+    def analyze_volume_ratio(self) -> Tuple[str, str]:
+        """
+        分析Volume Ratio
+        官方定义: ATM Put Delta与Call Delta成交量比（非传统P/C Vol）
+        高比率 = 大量ATM Put头寸，到期后MM平空头对冲可能推动反弹
+        """
+        vr = self.indicators.volume_ratio
         
-        result['symbols'].append(symbol)
+        if vr > 1.5:
+            return "高", f"Volume Ratio {vr:.2f}: 大量ATM Put头寸，到期后可能推动反弹"
+        elif vr > 1.0:
+            return "略高", f"Volume Ratio {vr:.2f}: ATM Put偏多"
+        elif vr < 0.7:
+            return "低", f"Volume Ratio {vr:.2f}: ATM Call主导"
+        else:
+            return "均衡", f"Volume Ratio {vr:.2f}: 均衡"
+    
+    def analyze_hedge_wall(self) -> str:
+        """分析Hedge Wall位置"""
+        hw = self.levels.get('hedge_wall', 0)
+        if not hw:
+            return "Hedge Wall 数据缺失"
         
-        # 四维分析
-        geography = analyze_geography(row)
-        dynamics = analyze_dynamics(row, geography)
-        sentiment = analyze_sentiment(row, geography)
-        volatility = analyze_volatility(row)
-        conclusion = derive_conclusion(geography, dynamics, sentiment, volatility)
+        if self.current_price > hw:
+            return f"价格 > Hedge Wall ({hw:.0f}): 均值回归模式"
+        else:
+            return f"价格 < Hedge Wall ({hw:.0f}): ⚠️ 高波动/趋势模式"
+    
+    def analyze_next_exp_concentration(self) -> Tuple[bool, str]:
+        """
+        分析下次到期集中度
+        官方: Next Exp Gamma > 25% = 短期头寸集中，到期前后易剧烈波动
+        """
+        neg = self.indicators.next_exp_gamma_pct
+        is_concentrated = neg > 25
         
-        # 存储完整分析
-        result['analysis_by_symbol'][symbol] = {
-            'geography': geography,
-            'dynamics': dynamics,
-            'sentiment': sentiment,
-            'volatility': volatility,
-            'conclusion': conclusion,
+        if is_concentrated:
+            return True, f"⚠️ Next Exp Gamma {neg:.1f}% > 25%: 到期前后易剧烈波动！"
+        else:
+            return False, f"Next Exp Gamma {neg:.1f}%: 正常分布"
+    
+    def calculate_implied_range(self) -> Tuple[float, float]:
+        """计算隐含波动范围 (Options Implied Move 是美元值！)"""
+        im = self.indicators.options_implied_move
+        price = self.current_price
+        
+        if not im or not price:
+            return price - 5, price + 5
+        
+        return price - im, price + im
+    
+    def get_risk_level(self) -> RiskLevel:
+        """获取风险等级"""
+        gamma_env, dist, dist_pct = self.determine_gamma_environment()
+        
+        if abs(dist_pct) < 0.5:
+            risk = RiskLevel.EXTREME
+        elif abs(dist_pct) < 1.0:
+            risk = RiskLevel.HIGH
+        elif abs(dist_pct) < 2.0:
+            risk = RiskLevel.MEDIUM
+        else:
+            risk = RiskLevel.LOW
+        
+        if gamma_env == GammaEnvironment.NEGATIVE:
+            if risk == RiskLevel.LOW:
+                risk = RiskLevel.MEDIUM
+            elif risk == RiskLevel.MEDIUM:
+                risk = RiskLevel.HIGH
+        
+        return risk
+    
+    def generate_scenarios(self) -> List[Dict]:
+        """生成情景分析"""
+        gamma_env, _, _ = self.determine_gamma_environment()
+        
+        zg = self.levels.get('zero_gamma', 0) or self.levels.get('hedge_wall', self.current_price)
+        cw = self.levels.get('call_wall', self.current_price + 10)
+        pw = self.levels.get('put_wall', self.current_price - 15)
+        price = self.current_price
+        
+        if gamma_env == GammaEnvironment.POSITIVE:
+            return [
+                {
+                    "name": "区间震荡",
+                    "probability": 55,
+                    "description": f"在 {zg:.0f}-{cw:.0f} 区间震荡",
+                    "strategy": "支撑做多，阻力获利"
+                },
+                {
+                    "name": "冲高回落",
+                    "probability": 30,
+                    "description": f"冲击 {cw:.0f} Call Wall 后回落",
+                    "strategy": "不追Call Wall突破"
+                },
+                {
+                    "name": "下探反弹",
+                    "probability": 15,
+                    "description": f"下探 {zg:.0f} Zero Gamma 后反弹",
+                    "strategy": "Zero Gamma是做多机会"
+                }
+            ]
+        else:
+            return [
+                {
+                    "name": "继续下跌",
+                    "probability": 50,
+                    "description": f"测试 {pw:.0f} Put Wall",
+                    "strategy": "不抄底，等Put Wall"
+                },
+                {
+                    "name": "反弹受阻",
+                    "probability": 35,
+                    "description": f"反弹至 {zg:.0f} Zero Gamma 受阻",
+                    "strategy": "反弹不追，观察能否站稳ZG"
+                },
+                {
+                    "name": "站回正Gamma",
+                    "probability": 15,
+                    "description": f"强势站稳 {zg:.0f} 上方",
+                    "strategy": "需利好催化，确认后可做多"
+                }
+            ]
+    
+    def get_trading_signals(self) -> Dict:
+        """获取交易信号"""
+        gamma_env, _, _ = self.determine_gamma_environment()
+        
+        zg = self.levels.get('zero_gamma', 0) or self.levels.get('hedge_wall', 0)
+        cw = self.levels.get('call_wall', 0)
+        pw = self.levels.get('put_wall', 0)
+        
+        if gamma_env == GammaEnvironment.POSITIVE:
+            return {
+                "long_entry": zg if zg else None,
+                "long_desc": "Zero Gamma支撑",
+                "short_entry": cw if cw else None,
+                "short_desc": "Call Wall阻力",
+                "stop_loss": (zg - 3) if zg else None,
+                "target": cw
+            }
+        else:
+            return {
+                "long_entry": pw if pw else None,
+                "long_desc": "Put Wall强支撑",
+                "short_entry": zg if zg else None,
+                "short_desc": "Zero Gamma(变阻力)",
+                "stop_loss": (zg + 2) if zg else None,
+                "target": pw
+            }
+    
+    def get_full_analysis(self) -> Dict:
+        """获取完整分析结果"""
+        gamma_env, dist, dist_pct = self.determine_gamma_environment()
+        delta_bias, delta_msg = self.analyze_delta_ratio()
+        gamma_bias, gamma_msg = self.analyze_gamma_ratio()
+        vol_level, vol_msg = self.analyze_volume_ratio()
+        hedge_msg = self.analyze_hedge_wall()
+        exp_concentrated, exp_msg = self.analyze_next_exp_concentration()
+        implied_low, implied_high = self.calculate_implied_range()
+        risk = self.get_risk_level()
+        scenarios = self.generate_scenarios()
+        signals = self.get_trading_signals()
+        
+        return {
+            "ticker": self.ticker,
+            "current_price": self.current_price,
+            "previous_close": self.previous_close,
+            "levels": self.levels,
+            "indicators": self.indicators,
+            
+            # Gamma环境
+            "gamma_environment": gamma_env,
+            "distance_to_zg": dist,
+            "distance_to_zg_pct": dist_pct,
+            
+            # 方向分析
+            "delta_bias": delta_bias,
+            "delta_msg": delta_msg,
+            "gamma_bias": gamma_bias,
+            "gamma_msg": gamma_msg,
+            "volume_level": vol_level,
+            "volume_msg": vol_msg,
+            "hedge_wall_msg": hedge_msg,
+            "exp_concentrated": exp_concentrated,
+            "exp_msg": exp_msg,
+            
+            # 波动预测
+            "implied_low": implied_low,
+            "implied_high": implied_high,
+            
+            # 风险和信号
+            "risk_level": risk,
+            "scenarios": scenarios,
+            "signals": signals,
         }
-        
-        # 汇总分类
-        if geography['gamma_env'] == '正Gamma':
-            result['gamma_summary']['positive_gamma'].append(symbol)
-        elif geography['gamma_env'] == '负Gamma':
-            result['gamma_summary']['negative_gamma'].append(symbol)
-        
-        if sentiment['composite_score'] > 20:
-            result['sentiment_summary']['bullish'].append(symbol)
-        elif sentiment['composite_score'] < -30:
-            result['sentiment_summary']['bearish'].append(symbol)
-        else:
-            result['sentiment_summary']['neutral'].append(symbol)
-        
-        if '卖' in volatility['vol_edge']:
-            result['volatility_summary']['sell_vol'].append(symbol)
-        elif '买' in volatility['vol_edge']:
-            result['volatility_summary']['buy_vol'].append(symbol)
-        
-        if volatility['skew_desc'] == 'Put溢价 (避险)':
-            result['volatility_summary']['skew_fear'].append(symbol)
-        elif volatility['skew_desc'] == 'Put便宜 (乐观)':
-            result['volatility_summary']['skew_greed'].append(symbol)
-        
-        # 生成预警
-        # 1. 负Gamma + 偏空 = 高风险
-        if geography['gamma_env'] == '负Gamma' and sentiment['composite_score'] < -30:
-            result['alerts'].append({
-                'symbol': symbol,
-                'level': 'high',
-                'emoji': '🚨',
-                'message': f'{symbol}: 负Gamma + 方向偏空，下跌可能加速'
-            })
-        
-        # 2. Cliff Risk高
-        if dynamics['cliff_risk'] in ['高', '极高']:
-            result['alerts'].append({
-                'symbol': symbol,
-                'level': 'medium',
-                'emoji': '⚠️',
-                'message': f'{symbol}: 悬崖风险{dynamics["cliff_risk"]}，大量Gamma将在{row.get("top_gamma_exp", "近期")}释放'
-            })
-        
-        # 3. Garch极低警告
-        if volatility['garch_warning']:
-            result['alerts'].append({
-                'symbol': symbol,
-                'level': 'medium',
-                'emoji': '💥',
-                'message': f'{symbol}: Garch Rank极低，统计波动收缩，警惕爆发'
-            })
-        
-        # 4. 交易信号
-        for sig in sentiment['active_signals']:
-            if sig['type'] in ['trap', 'breakout']:
-                result['alerts'].append({
-                    'symbol': symbol,
-                    'level': 'high' if sig['type'] == 'trap' else 'medium',
-                    'emoji': sig['emoji'],
-                    'message': f'{symbol}: {sig["title"]} - {sig["desc"]}'
-                })
-    
-    return result
 
 
-# ==================== Streamlit 显示函数 ====================
+# ============================================================
+# 高级分析函数
+# ============================================================
 
-def render_spotgamma_section(df: pd.DataFrame, st_module):
+def generate_full_analysis(df: pd.DataFrame, tickers: List[str] = None, prices: Dict[str, float] = None) -> Dict:
     """
-    在Streamlit中渲染SpotGamma分析章节
+    生成完整的SpotGamma分析
+    
+    Args:
+        df: SpotGamma CSV DataFrame
+        tickers: 要分析的股票列表，默认 ['QQQ', 'SPY']
+        prices: 当前价格字典，如 {'QQQ': 520.5, 'SPY': 580.2}
+    
+    Returns:
+        包含所有分析结果的字典
+    """
+    if tickers is None:
+        tickers = ['QQQ', 'SPY']
+    
+    if prices is None:
+        prices = {}
+    
+    results = {}
+    
+    for ticker in tickers:
+        analyzer = SpotGammaAnalyzer(ticker)
+        price = prices.get(ticker, 0)
+        
+        if price:
+            analyzer.load_from_csv(df, price)
+            results[ticker] = analyzer.get_full_analysis()
+        else:
+            # 尝试从CSV获取价格
+            levels, _ = extract_stock_data(df, ticker)
+            if levels:
+                # 使用hedge_wall作为近似价格
+                approx_price = levels.get('hedge_wall', 0) or levels.get('key_gamma_strike', 0)
+                if approx_price:
+                    analyzer.load_from_csv(df, approx_price)
+                    results[ticker] = analyzer.get_full_analysis()
+    
+    return results
+
+
+# ============================================================
+# Streamlit 渲染函数
+# ============================================================
+
+def render_spotgamma_section(df: pd.DataFrame, st_module, prices: Dict[str, float] = None) -> Dict:
+    """
+    渲染SpotGamma分析部分
+    
+    Args:
+        df: SpotGamma CSV DataFrame
+        st_module: streamlit模块
+        prices: 当前价格字典
+    
+    Returns:
+        分析结果字典
     """
     st = st_module
     
-    # 生成完整分析
-    analysis = generate_full_analysis(df)
+    # 获取价格输入
+    if prices is None:
+        prices = {}
     
-    # ===== 1. 综合结论面板 =====
-    st.markdown("### 🎯 综合结论")
+    col_p1, col_p2, col_p3 = st.columns(3)
+    with col_p1:
+        qqq_price = st.number_input("QQQ 当前价格", value=prices.get('QQQ', 520.0), step=0.01, key="sg_qqq_price")
+        prices['QQQ'] = qqq_price
+    with col_p2:
+        spy_price = st.number_input("SPY 当前价格", value=prices.get('SPY', 580.0), step=0.01, key="sg_spy_price")
+        prices['SPY'] = spy_price
+    with col_p3:
+        # 日历效应
+        is_data_day = st.checkbox("今日有重要数据?", key="sg_data_day")
+        data_event = st.text_input("数据事件", placeholder="CPI/PPI/FOMC", key="sg_event")
     
-    # 显示每个标的的结论
-    conclusions_data = []
-    for sym in analysis['symbols'][:10]:  # 最多显示10个
-        sym_data = analysis['analysis_by_symbol'].get(sym)
-        if sym_data:
-            g = sym_data['geography']
-            d = sym_data['dynamics']
-            c = sym_data['conclusion']
-            conclusions_data.append({
-                '标的': sym,
-                '价格': f"${g['price']:.2f}" if g['price'] else 'N/A',
-                'Gamma环境': f"{g['gamma_env_emoji']} {g['gamma_env']}",
-                '位置': g['position_zone'],
-                '磁吸': f"{d['pinning_emoji']} {d['pinning_strength']}",
-                '悬崖风险': f"{d['cliff_emoji']} {d['cliff_risk']}",
-                '操作建议': f"{c['action_emoji']} {c['action']}",
-                '理由': c['reason'],
-            })
+    # 手动输入Zero Gamma（CSV可能没有）
+    with st.expander("📝 手动输入关键位置 (可选)", expanded=False):
+        st.caption("如果CSV中没有Zero Gamma等位置，可在此手动输入")
+        mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+        with mcol1:
+            manual_zg_qqq = st.number_input("QQQ Zero Gamma", value=0.0, step=0.5, key="manual_zg_qqq")
+        with mcol2:
+            manual_cw_qqq = st.number_input("QQQ Call Wall", value=0.0, step=0.5, key="manual_cw_qqq")
+        with mcol3:
+            manual_pw_qqq = st.number_input("QQQ Put Wall", value=0.0, step=0.5, key="manual_pw_qqq")
+        with mcol4:
+            manual_vt_qqq = st.number_input("QQQ Vol Trigger", value=0.0, step=0.5, key="manual_vt_qqq")
     
-    if conclusions_data:
-        st.dataframe(pd.DataFrame(conclusions_data), use_container_width=True, hide_index=True)
+    # 分析主要标的
+    analysis_results = {}
     
-    # ===== 2. 风险预警 =====
-    if analysis['alerts']:
-        st.markdown("### ⚠️ 风险预警")
+    for ticker in ['QQQ', 'SPY']:
+        analyzer = SpotGammaAnalyzer(ticker)
+        price = prices.get(ticker, 0)
         
-        high_alerts = [a for a in analysis['alerts'] if a['level'] == 'high']
-        med_alerts = [a for a in analysis['alerts'] if a['level'] == 'medium']
-        
-        if high_alerts:
-            for alert in high_alerts[:5]:
-                st.error(f"{alert['emoji']} {alert['message']}")
-        
-        if med_alerts:
-            with st.expander(f"⚠️ 中等风险预警 ({len(med_alerts)}条)", expanded=False):
-                for alert in med_alerts[:10]:
-                    st.warning(f"{alert['emoji']} {alert['message']}")
+        if price:
+            analyzer.load_from_csv(df, price)
+            analyzer.is_data_day = is_data_day
+            analyzer.data_event = data_event
+            
+            # 应用手动输入的位置
+            if ticker == 'QQQ':
+                analyzer.set_manual_levels(
+                    zero_gamma=manual_zg_qqq if manual_zg_qqq > 0 else 0,
+                    call_wall=manual_cw_qqq if manual_cw_qqq > 0 else 0,
+                    put_wall=manual_pw_qqq if manual_pw_qqq > 0 else 0,
+                    volatility_trigger=manual_vt_qqq if manual_vt_qqq > 0 else 0
+                )
+            
+            result = analyzer.get_full_analysis()
+            analysis_results[ticker] = result
     
-    # ===== 3. Gamma环境总览 =====
-    st.markdown("### 🌍 Gamma环境总览")
+    # 渲染QQQ分析
+    if 'QQQ' in analysis_results:
+        render_single_stock_analysis(st, analysis_results['QQQ'], expanded=True)
     
-    pos_gamma = analysis['gamma_summary']['positive_gamma']
-    neg_gamma = analysis['gamma_summary']['negative_gamma']
+    # 渲染SPY分析（折叠）
+    if 'SPY' in analysis_results:
+        with st.expander("📊 SPY Gamma分析", expanded=False):
+            render_single_stock_analysis(st, analysis_results['SPY'], expanded=False, show_header=False)
     
-    col1, col2, col3 = st.columns(3)
+    # 显示完整数据表
+    with st.expander("📋 完整数据表", expanded=False):
+        st.dataframe(df, use_container_width=True, height=400)
+    
+    return analysis_results
+
+
+def render_single_stock_analysis(st, result: Dict, expanded: bool = True, show_header: bool = True):
+    """渲染单只股票的分析"""
+    
+    ticker = result['ticker']
+    gamma_env = result['gamma_environment']
+    
+    if show_header:
+        # Gamma环境大标题
+        if gamma_env == GammaEnvironment.POSITIVE:
+            st.success(f"🟢 **{ticker} 正 Gamma 环境** | 距 Zero Gamma: ${result['distance_to_zg']:.2f} ({result['distance_to_zg_pct']:.2f}%)")
+        elif gamma_env == GammaEnvironment.NEGATIVE:
+            st.error(f"🔴 **{ticker} 负 Gamma 环境** | 距 Zero Gamma: ${result['distance_to_zg']:.2f} ({result['distance_to_zg_pct']:.2f}%)")
+        else:
+            st.info(f"⚪ **{ticker} Gamma环境**: 数据不足")
+    
+    # 核心指标卡片
+    col1, col2, col3, col4 = st.columns(4)
+    
+    indicators = result['indicators']
     
     with col1:
-        st.metric("正Gamma", len(pos_gamma), help="价格在Hedge Wall之上，波动抑制")
-        if pos_gamma:
-            st.success(", ".join(pos_gamma[:8]))
+        delta_color = "normal" if result['delta_bias'] == MarketBias.BULLISH else "inverse" if result['delta_bias'] == MarketBias.BEARISH else "off"
+        st.metric("Delta Ratio", f"{indicators.delta_ratio:.2f}", delta=result['delta_bias'].value, delta_color=delta_color)
     
     with col2:
-        st.metric("负Gamma", len(neg_gamma), help="价格在Hedge Wall之下，波动放大")
-        if neg_gamma:
-            st.warning(", ".join(neg_gamma[:8]))
+        gamma_color = "normal" if result['gamma_bias'] == MarketBias.BULLISH else "inverse" if result['gamma_bias'] == MarketBias.BEARISH else "off"
+        st.metric("Gamma Ratio", f"{indicators.gamma_ratio:.2f}", delta=result['gamma_bias'].value, delta_color=gamma_color)
     
     with col3:
-        total = len(pos_gamma) + len(neg_gamma)
-        if total > 0:
-            pos_pct = len(pos_gamma) / total * 100
-            st.metric("正Gamma占比", f"{pos_pct:.0f}%")
-            if pos_pct > 60:
-                st.caption("✅ 整体波动抑制环境")
-            elif pos_pct < 40:
-                st.caption("⚠️ 整体波动放大环境")
+        st.metric("Implied Move", f"${indicators.options_implied_move:.2f}")
+    
+    with col4:
+        risk = result['risk_level']
+        risk_delta = "⚠️" if risk in [RiskLevel.HIGH, RiskLevel.EXTREME] else ""
+        st.metric("风险等级", risk.value, delta=risk_delta)
+    
+    # 关键位置
+    st.markdown("#### 📍 关键位置")
+    levels = result['levels']
+    
+    level_cols = st.columns(5)
+    level_items = [
+        ('Zero Gamma / Hedge Wall', levels.get('zero_gamma', 0) or levels.get('hedge_wall', 0)),
+        ('Call Wall', levels.get('call_wall', 0)),
+        ('Put Wall', levels.get('put_wall', 0)),
+        ('Key Gamma Strike', levels.get('key_gamma_strike', 0)),
+        ('Key Delta Strike', levels.get('key_delta_strike', 0)),
+    ]
+    
+    for i, (name, value) in enumerate(level_items):
+        with level_cols[i]:
+            if value:
+                # 计算与当前价格的距离
+                dist = value - result['current_price']
+                dist_str = f"+{dist:.1f}" if dist > 0 else f"{dist:.1f}"
+                st.metric(name, f"${value:.0f}", delta=dist_str)
             else:
-                st.caption("⚪ 混合环境")
+                st.metric(name, "N/A")
     
-    # ===== 4. 关键位地图 =====
-    st.markdown("### 📍 关键位地图")
+    # 方向性分析
+    st.markdown("#### 📈 方向性分析")
     
-    key_symbols = ['NDX', 'QQQ', 'SPY', 'IWM', 'SPX']
-    display_symbols = [s for s in key_symbols if s in analysis['symbols']]
-    if not display_symbols:
-        display_symbols = analysis['symbols'][:6]
+    analysis_cols = st.columns(2)
     
-    levels_data = []
-    for sym in display_symbols:
-        sym_data = analysis['analysis_by_symbol'].get(sym)
-        if sym_data:
-            g = sym_data['geography']
-            levels_data.append({
-                '标的': sym,
-                '价格': f"${g['price']:.2f}" if g['price'] else 'N/A',
-                'Put Wall': f"${g['put_wall']:.0f}" if g['put_wall'] else 'N/A',
-                'Hedge Wall': f"${g['hedge_wall']:.0f}" if g['hedge_wall'] else 'N/A',
-                'Call Wall': f"${g['call_wall']:.0f}" if g['call_wall'] else 'N/A',
-                '距CW': f"{g['dist_to_call_wall']:+.1f}%",
-                '距PW': f"{g['dist_to_put_wall']:+.1f}%",
-                '位置': g['position_zone'],
-            })
+    with analysis_cols[0]:
+        st.markdown(f"- {result['delta_msg']}")
+        st.markdown(f"- {result['gamma_msg']}")
+        st.markdown(f"- {result['volume_msg']}")
     
-    if levels_data:
-        st.dataframe(pd.DataFrame(levels_data), use_container_width=True, hide_index=True)
-    
-    # ===== 5. 方向性指标 =====
-    st.markdown("### 📊 方向性指标")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        bullish = analysis['sentiment_summary']['bullish']
-        st.markdown("**🟢 看多信号**")
-        if bullish:
-            for sym in bullish[:5]:
-                score = analysis['analysis_by_symbol'][sym]['sentiment']['composite_score']
-                st.markdown(f"- {sym}: +{score}")
-        else:
-            st.caption("无")
-    
-    with col2:
-        neutral = analysis['sentiment_summary']['neutral']
-        st.markdown("**⚪ 中性**")
-        if neutral:
-            st.caption(", ".join(neutral[:8]))
-        else:
-            st.caption("无")
-    
-    with col3:
-        bearish = analysis['sentiment_summary']['bearish']
-        st.markdown("**🔴 看空信号**")
-        if bearish:
-            for sym in bearish[:5]:
-                score = analysis['analysis_by_symbol'][sym]['sentiment']['composite_score']
-                st.markdown(f"- {sym}: {score}")
-        else:
-            st.caption("无")
-    
-    # 方向性详细表格
-    with st.expander("📋 方向性指标详情", expanded=False):
-        dir_data = []
-        for sym in analysis['symbols']:
-            sym_data = analysis['analysis_by_symbol'].get(sym)
-            if sym_data:
-                s = sym_data['sentiment']
-                dir_data.append({
-                    '标的': sym,
-                    'Delta Ratio': f"{s['delta_ratio']:.2f}" if s['delta_ratio'] else 'N/A',
-                    'Delta': f"{s['delta_signal']} {s['delta_desc']}",
-                    'Gamma Ratio': f"{s['gamma_ratio']:.2f}" if s['gamma_ratio'] else 'N/A',
-                    'Gamma': f"{s['gamma_signal']} {s['gamma_desc']}",
-                    'P/C OI': f"{s['pc_oi_ratio']:.2f}" if s['pc_oi_ratio'] else 'N/A',
-                    'P/C': f"{s['pc_signal']} {s['pc_desc']}",
-                    'Vol Ratio': f"{s['volume_ratio']:.2f}" if s['volume_ratio'] else 'N/A',
-                    '综合': f"{s['composite_signal']} {s['composite_score']:+.0f}",
-                })
+    with analysis_cols[1]:
+        st.markdown(f"- {result['hedge_wall_msg']}")
+        st.markdown(f"- {result['exp_msg']}")
         
-        if dir_data:
-            st.dataframe(pd.DataFrame(dir_data), use_container_width=True, hide_index=True)
-    
-    # ===== 6. 波动率洞察 =====
-    st.markdown("### 📈 波动率性价比")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**IV vs RV 定价**")
-        sell_vol = analysis['volatility_summary']['sell_vol']
-        buy_vol = analysis['volatility_summary']['buy_vol']
-        
-        if sell_vol:
-            st.error(f"📉 期权高估 (卖方机会): {', '.join(sell_vol[:6])}")
-        if buy_vol:
-            st.success(f"📈 期权低估 (买方机会): {', '.join(buy_vol[:6])}")
-        if not sell_vol and not buy_vol:
-            st.info("⚪ 定价普遍合理")
-    
-    with col2:
-        st.markdown("**Skew 市场情绪**")
-        skew_fear = analysis['volatility_summary']['skew_fear']
-        skew_greed = analysis['volatility_summary']['skew_greed']
-        
-        if skew_fear:
-            st.warning(f"🔴 避险情绪 (Put溢价): {', '.join(skew_fear[:6])}")
-        if skew_greed:
-            st.success(f"🟢 乐观情绪 (Put便宜): {', '.join(skew_greed[:6])}")
-        if not skew_fear and not skew_greed:
-            st.info("⚪ Skew正常")
-    
-    # 波动率详细表格
-    with st.expander("📋 波动率详情", expanded=False):
-        vol_data = []
-        for sym in analysis['symbols']:
-            sym_data = analysis['analysis_by_symbol'].get(sym)
-            if sym_data:
-                v = sym_data['volatility']
-                vol_data.append({
-                    '标的': sym,
-                    '1M IV': f"{v['iv_1m']*100:.1f}%" if v['iv_1m'] else 'N/A',
-                    '1M RV': f"{v['rv_1m']*100:.1f}%" if v['rv_1m'] else 'N/A',
-                    'IV-RV': f"{v['iv_rv_spread']*100:+.1f}%" if v['iv_rv_spread'] else 'N/A',
-                    '定价': f"{v['vol_edge_emoji']} {v['vol_edge'][:10]}..." if len(v['vol_edge']) > 10 else f"{v['vol_edge_emoji']} {v['vol_edge']}",
-                    'Garch': f"{v.get('garch_rank', 0)*100:.0f}%" if v.get('garch_rank') else 'N/A',
-                    '30D Skew': f"{v['skew']:.3f}" if v['skew'] else 'N/A',
-                    'Skew情绪': f"{v['skew_signal']} {v['skew_desc']}",
-                    'NE Skew': f"{v['ne_skew']:.3f}" if v['ne_skew'] else 'N/A',
-                    '隐含波动': f"±${v['implied_move']:.2f}" if v['implied_move'] else 'N/A',
-                })
-        
-        if vol_data:
-            st.dataframe(pd.DataFrame(vol_data), use_container_width=True, hide_index=True)
-        
-        st.caption("""
-        **SpotGamma波动率逻辑:**
-        - IV > RV → 期权定价偏高，适合卖方策略
-        - IV < RV → 期权定价偏低，适合买方策略
-        - Garch Rank < 10% → 统计波动极低，警惕突然爆发
-        - Skew正值 = Put溢价(避险)，负值 = Put便宜(乐观)
-        """)
-    
-    # ===== 7. 交易信号汇总 =====
-    st.markdown("### 💡 交易信号")
-    
-    all_signals = []
-    for sym in analysis['symbols']:
-        sym_data = analysis['analysis_by_symbol'].get(sym)
-        if sym_data:
-            for sig in sym_data['sentiment']['active_signals']:
-                all_signals.append({
-                    'symbol': sym,
-                    **sig
-                })
-    
-    if all_signals:
-        for sig in all_signals[:8]:
-            if sig['type'] == 'trap':
-                st.error(f"{sig['emoji']} **{sig['symbol']}** {sig['title']}: {sig['desc']}")
-            elif sig['type'] == 'breakout':
-                st.success(f"{sig['emoji']} **{sig['symbol']}** {sig['title']}: {sig['desc']}")
-            elif sig['type'] == 'rebound':
-                st.info(f"{sig['emoji']} **{sig['symbol']}** {sig['title']}: {sig['desc']}")
+        # IV vs RV
+        iv = indicators.one_month_iv
+        rv = indicators.one_month_rv
+        if iv and rv:
+            iv_rv_diff = iv - rv
+            if iv_rv_diff > 5:
+                st.markdown(f"- IV {iv:.1f}% > RV {rv:.1f}%: 期权偏贵")
+            elif iv_rv_diff < -5:
+                st.markdown(f"- IV {iv:.1f}% < RV {rv:.1f}%: 期权便宜")
             else:
-                st.warning(f"{sig['emoji']} **{sig['symbol']}** {sig['title']}: {sig['desc']}")
-    else:
-        st.info("⚪ 当前无明显交易信号，市场处于区间震荡")
+                st.markdown(f"- IV {iv:.1f}% ≈ RV {rv:.1f}%: 定价合理")
     
-    return analysis
+    # 情景分析
+    st.markdown("#### 🔮 情景分析")
+    
+    scenario_cols = st.columns(len(result['scenarios']))
+    for i, scenario in enumerate(result['scenarios']):
+        with scenario_cols[i]:
+            st.markdown(f"**{scenario['name']}** ({scenario['probability']}%)")
+            st.caption(scenario['description'])
+            st.markdown(f"*策略: {scenario['strategy']}*")
+    
+    # 操作建议
+    st.markdown("#### 💡 操作建议")
+    
+    if gamma_env == GammaEnvironment.POSITIVE:
+        st.info("**正 Gamma 铁律:** ❌不追Call Wall突破 | ✅Zero Gamma是支撑 | ✅预期均值回归")
+    elif gamma_env == GammaEnvironment.NEGATIVE:
+        st.warning("**负 Gamma 铁律:** ❌不在ZG下方抄底 | ❌ZG现在是阻力 | ✅等Put Wall或站回ZG")
+    
+    signals = result['signals']
+    sig_cols = st.columns(3)
+    
+    with sig_cols[0]:
+        if signals.get('long_entry'):
+            st.success(f"做多观察: ${signals['long_entry']:.0f}\n({signals['long_desc']})")
+    
+    with sig_cols[1]:
+        if signals.get('short_entry'):
+            st.error(f"做空观察: ${signals['short_entry']:.0f}\n({signals['short_desc']})")
+    
+    with sig_cols[2]:
+        if signals.get('stop_loss'):
+            st.warning(f"止损参考: ${signals['stop_loss']:.0f}")
+
+
+# ============================================================
+# 工具函数
+# ============================================================
+
+def get_gamma_summary(analysis: Dict) -> str:
+    """生成Gamma分析摘要文本"""
+    if not analysis:
+        return "无分析数据"
+    
+    lines = []
+    
+    for ticker, result in analysis.items():
+        gamma_env = result['gamma_environment']
+        env_str = "正Gamma" if gamma_env == GammaEnvironment.POSITIVE else "负Gamma" if gamma_env == GammaEnvironment.NEGATIVE else "中性"
+        
+        lines.append(f"## {ticker} Gamma分析")
+        lines.append(f"- 环境: {env_str}")
+        lines.append(f"- 距Zero Gamma: ${result['distance_to_zg']:.2f} ({result['distance_to_zg_pct']:.2f}%)")
+        lines.append(f"- Delta Ratio: {result['indicators'].delta_ratio:.2f} ({result['delta_bias'].value})")
+        lines.append(f"- Gamma Ratio: {result['indicators'].gamma_ratio:.2f} ({result['gamma_bias'].value})")
+        lines.append(f"- Implied Move: ${result['indicators'].options_implied_move:.2f}")
+        lines.append(f"- 风险等级: {result['risk_level'].value}")
+        
+        levels = result['levels']
+        lines.append(f"- Call Wall: ${levels.get('call_wall', 0):.0f}")
+        lines.append(f"- Put Wall: ${levels.get('put_wall', 0):.0f}")
+        lines.append(f"- Zero Gamma: ${levels.get('zero_gamma', 0) or levels.get('hedge_wall', 0):.0f}")
+        
+        lines.append("")
+    
+    return "\n".join(lines)

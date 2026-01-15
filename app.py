@@ -40,12 +40,17 @@ try:
 except ImportError:
     ROTATION_SCANNER_AVAILABLE = False
 
-# 导入SpotGamma模块
+# 导入SpotGamma模块 (增强版)
 try:
     from spotgamma_analyzer import (
         parse_spotgamma_csv,
         generate_full_analysis,
         render_spotgamma_section,
+        get_gamma_summary,
+        SpotGammaAnalyzer,
+        GammaEnvironment,
+        MarketBias,
+        RiskLevel,
     )
     SPOTGAMMA_AVAILABLE = True
 except ImportError:
@@ -1268,11 +1273,26 @@ def main():
         sg_df = parse_spotgamma_csv(spotgamma_file)
         
         if sg_df is not None and not sg_df.empty:
+            # 获取当前价格 (如果有的话)
+            yahoo_data = all_data.get('yahoo', pd.DataFrame())
+            prices = {}
+            if yahoo_data is not None and not yahoo_data.empty:
+                if 'QQQ' in yahoo_data.columns:
+                    prices['QQQ'] = float(yahoo_data['QQQ'].dropna().iloc[-1])
+                if 'SPY' in yahoo_data.columns:
+                    prices['SPY'] = float(yahoo_data['SPY'].dropna().iloc[-1])
+            
             # 渲染SpotGamma分析
-            sg_analysis = render_spotgamma_section(sg_df, st)
+            sg_analysis = render_spotgamma_section(sg_df, st, prices)
             
             # 存储分析结果供其他模块使用
             st.session_state['spotgamma_analysis'] = sg_analysis
+            
+            # 生成分析摘要供Claude使用
+            if sg_analysis:
+                with st.expander("📋 SpotGamma分析摘要 (供Claude)", expanded=False):
+                    summary = get_gamma_summary(sg_analysis)
+                    st.code(summary, language="markdown")
         else:
             st.warning("SpotGamma CSV解析失败，请检查文件格式")
     elif SPOTGAMMA_AVAILABLE:
@@ -1287,10 +1307,17 @@ def main():
             
             **分析内容包括:**
             - Gamma环境总览 (正/负Gamma)
-            - 关键位地图 (Call Wall, Put Wall, Zero Gamma)
-            - 方向性指标 (Delta Ratio, Gamma Ratio, P/C OI)
+            - 关键位地图 (Call Wall, Put Wall, Zero Gamma, Hedge Wall)
+            - 方向性指标 (Delta Ratio, Gamma Ratio, Volume Ratio)
             - 波动率洞察 (IV vs RV, Skew, IV Rank)
+            - 情景分析和操作铁律
             - 风险预警和交易提示
+            
+            **官方指标定义:**
+            - **Volume Ratio**: ATM Put Delta与Call Delta成交量比（非传统P/C Vol），高=到期后可能反弹
+            - **Options Implied Move**: 美元值（非百分比）
+            - **Hedge Wall**: 做市商风险暴露变化位，上方=均值回归，下方=高波动
+            - **Next Exp Gamma >25%**: 短期头寸集中，到期前后易剧烈波动
             """)
     
     # ==================== 附录 ====================
