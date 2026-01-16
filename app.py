@@ -551,17 +551,62 @@ def main():
             spotgamma_file = st.file_uploader(
                 "上传SpotGamma CSV",
                 type=['csv'],
-                help="从SpotGamma Data Table导出CSV文件",
+                help="从SpotGamma Data Table导出CSV文件（支持多日期累积数据）",
                 key="spotgamma_upload"
             )
             
             if spotgamma_file is not None:
+                # 预读取CSV检查是否有日期列
+                spotgamma_file.seek(0)
+                try:
+                    preview_df = pd.read_csv(spotgamma_file)
+                    spotgamma_file.seek(0)
+                    
+                    # 检查是否有日期列
+                    date_col = None
+                    for col in ['DA', 'Date', 'date', 'DATE', '日期']:
+                        if col in preview_df.columns:
+                            date_col = col
+                            break
+                    
+                    if date_col:
+                        # 解析日期列
+                        preview_df[date_col] = pd.to_datetime(preview_df[date_col], format='mixed', errors='coerce')
+                        available_dates = preview_df[date_col].dropna().unique()
+                        available_dates = sorted(available_dates, reverse=True)
+                        
+                        if len(available_dates) > 0:
+                            date_options = [d.strftime('%Y-%m-%d') for d in pd.to_datetime(available_dates)]
+                            selected_sg_date = st.selectbox(
+                                "📅 选择SpotGamma数据日期",
+                                date_options,
+                                index=0,
+                                key="spotgamma_date_select"
+                            )
+                            st.session_state['spotgamma_selected_date'] = selected_sg_date
+                            st.session_state['spotgamma_date_col'] = date_col
+                            st.info(f"已选择 {selected_sg_date} 的数据")
+                        else:
+                            st.session_state['spotgamma_selected_date'] = None
+                            st.session_state['spotgamma_date_col'] = None
+                    else:
+                        st.session_state['spotgamma_selected_date'] = None
+                        st.session_state['spotgamma_date_col'] = None
+                except Exception as e:
+                    st.warning(f"预览CSV时出错: {e}")
+                    st.session_state['spotgamma_selected_date'] = None
+                    st.session_state['spotgamma_date_col'] = None
+                
                 st.session_state['spotgamma_file'] = spotgamma_file
                 st.success("✅ CSV已上传")
             elif 'spotgamma_file' in st.session_state:
                 st.info("📄 已有数据")
                 if st.button("🗑️ 清除数据", key="clear_spotgamma"):
                     del st.session_state['spotgamma_file']
+                    if 'spotgamma_selected_date' in st.session_state:
+                        del st.session_state['spotgamma_selected_date']
+                    if 'spotgamma_date_col' in st.session_state:
+                        del st.session_state['spotgamma_date_col']
                     st.rerun()
     
     with st.spinner("正在加载数据..."):
@@ -1270,7 +1315,95 @@ def main():
         
         # 需要重置文件指针
         spotgamma_file.seek(0)
-        sg_df = parse_spotgamma_csv(spotgamma_file)
+        
+        # 检查是否有日期过滤
+        selected_date = st.session_state.get('spotgamma_selected_date', None)
+        date_col = st.session_state.get('spotgamma_date_col', None)
+        
+        if selected_date and date_col:
+            # 先读取原始CSV进行日期过滤
+            try:
+                raw_df = pd.read_csv(spotgamma_file)
+                spotgamma_file.seek(0)
+                
+                # 解析日期列
+                raw_df[date_col] = pd.to_datetime(raw_df[date_col], format='mixed', errors='coerce')
+                selected_dt = pd.to_datetime(selected_date)
+                
+                # 过滤选中日期的数据
+                filtered_df = raw_df[raw_df[date_col] == selected_dt].copy()
+                
+                # 显示当前分析的日期
+                st.info(f"📅 当前分析日期: **{selected_date}** | 共 {len(filtered_df)} 条记录")
+                
+                if not filtered_df.empty:
+                    # 列名映射（处理手动录入格式）
+                    column_mapping = {
+                        'Current Price(盘前价)': 'Current Price',
+                        'previous close': 'Previous Close',
+                    }
+                    filtered_df = filtered_df.rename(columns=column_mapping)
+                    
+                    # 辅助函数：解析数值（处理 -1.8B, 1.2M, 41.12%% 等格式）
+                    def parse_sg_value(val):
+                        if pd.isna(val):
+                            return np.nan
+                        val_str = str(val).strip()
+                        val_str = val_str.replace("'", "").replace("$", "").replace(" ", "")
+                        val_str = val_str.replace("%%", "%")
+                        has_percent = '%' in val_str
+                        val_str = val_str.replace("%", "")
+                        
+                        multiplier = 1
+                        if val_str.endswith('B'):
+                            multiplier = 1e9
+                            val_str = val_str[:-1]
+                        elif val_str.endswith('M'):
+                            multiplier = 1e6
+                            val_str = val_str[:-1]
+                        elif val_str.endswith('K'):
+                            multiplier = 1e3
+                            val_str = val_str[:-1]
+                        
+                        try:
+                            result = float(val_str) * multiplier
+                            if has_percent and multiplier == 1:
+                                result = result / 100
+                            return result
+                        except:
+                            return np.nan
+                    
+                    # 处理数值列
+                    numeric_cols = ['Current Price', 'Previous Close', 'Call Wall', 'Put Wall', 
+                                   'Hedge Wall', 'Key Gamma Strike', 'Key Delta Strike',
+                                   'Options Impact', 'Gamma Ratio', 'Delta Ratio',
+                                   'Next Exp Gamma', 'Next Exp Delta', 'Volume Ratio',
+                                   'Put/Call OI Ratio', 'Call Gamma', 'Put Gamma',
+                                   'NE Skew', 'Skew', '1 M RV', '1 M IV', 
+                                   'IV Rank', 'Garch Rank', 'Skew Rank', 'Options Implied Move']
+                    
+                    for col in numeric_cols:
+                        if col in filtered_df.columns:
+                            filtered_df[col] = filtered_df[col].apply(parse_sg_value)
+                    
+                    # 使用过滤后的数据调用parse_spotgamma_csv
+                    # 创建一个临时文件对象（模拟上传的文件）
+                    import io
+                    temp_buffer = io.StringIO()
+                    filtered_df.to_csv(temp_buffer, index=False)
+                    temp_buffer.seek(0)
+                    
+                    sg_df = parse_spotgamma_csv(temp_buffer)
+                else:
+                    st.warning(f"所选日期 {selected_date} 没有数据")
+                    sg_df = None
+            except Exception as e:
+                st.error(f"日期过滤出错: {e}")
+                spotgamma_file.seek(0)
+                sg_df = parse_spotgamma_csv(spotgamma_file)
+        else:
+            # 没有日期列，直接解析
+            sg_df = parse_spotgamma_csv(spotgamma_file)
         
         if sg_df is not None and not sg_df.empty:
             # 获取当前价格 (如果有的话)
