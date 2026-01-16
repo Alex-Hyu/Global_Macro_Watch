@@ -608,6 +608,28 @@ def main():
                     if 'spotgamma_date_col' in st.session_state:
                         del st.session_state['spotgamma_date_col']
                     st.rerun()
+        
+        # ==================== SpotGamma Equity Hub 个股数据上传 ====================
+        if SPOTGAMMA_AVAILABLE:
+            st.divider()
+            st.subheader("📊 SpotGamma个股数据")
+            st.caption("用于第八章：个股多空信号分析")
+            
+            equity_hub_file = st.file_uploader(
+                "上传Equity Hub CSV",
+                type=['csv'],
+                help="从SpotGamma Equity Hub导出的多标的CSV文件",
+                key="equity_hub_upload"
+            )
+            
+            if equity_hub_file is not None:
+                st.session_state['equity_hub_file'] = equity_hub_file
+                st.success("✅ Equity Hub CSV已上传")
+            elif 'equity_hub_file' in st.session_state:
+                st.info("📄 已有Equity Hub数据")
+                if st.button("🗑️ 清除Equity Hub数据", key="clear_equity_hub"):
+                    del st.session_state['equity_hub_file']
+                    st.rerun()
     
     with st.spinner("正在加载数据..."):
         all_data = load_data()
@@ -1453,6 +1475,262 @@ def main():
             - **Options Implied Move**: 美元值（非百分比）
             - **Hedge Wall**: 做市商风险暴露变化位，上方=均值回归，下方=高波动
             - **Next Exp Gamma >25%**: 短期头寸集中，到期前后易剧烈波动
+            """)
+    
+    # ==================== 第八章：SpotGamma个股多空分析 ====================
+    
+    if SPOTGAMMA_AVAILABLE and 'equity_hub_file' in st.session_state:
+        st.markdown('<div class="chapter-header">📈 第八章：SpotGamma个股多空分析</div>', unsafe_allow_html=True)
+        st.markdown('*"哪些标的期权结构偏多？哪些偏空？做市商在押注什么？"*')
+        
+        equity_hub_file = st.session_state['equity_hub_file']
+        equity_hub_file.seek(0)
+        
+        try:
+            # 读取CSV（处理可能的多行表头）
+            first_line = equity_hub_file.readline().decode('utf-8')
+            equity_hub_file.seek(0)
+            
+            if 'Ticker Information' in first_line or 'isWatchlisted' in first_line:
+                eh_df = pd.read_csv(equity_hub_file)
+            else:
+                eh_df = pd.read_csv(equity_hub_file, skiprows=1)
+            
+            eh_df = eh_df.dropna(subset=['Symbol'])
+            
+            # 辅助函数：解析数值
+            def parse_eh_value(val):
+                if pd.isna(val) or val == '':
+                    return np.nan
+                val_str = str(val).strip().replace("'", "").replace(",", "")
+                try:
+                    return float(val_str)
+                except:
+                    return np.nan
+            
+            # 解析关键列
+            numeric_cols = ['Current Price', 'Delta Ratio', 'Gamma Ratio', 'Put Wall', 'Call Wall', 
+                           'Hedge Wall', 'Options Impact', 'Volume Ratio', 'Next Exp Gamma', 
+                           'Put/Call OI Ratio', 'IV Rank', 'Key Gamma Strike']
+            
+            for col in numeric_cols:
+                if col in eh_df.columns:
+                    eh_df[col] = eh_df[col].apply(parse_eh_value)
+            
+            # ===== 分析函数 =====
+            def analyze_equity(row):
+                """分析单个标的的期权结构"""
+                symbol = row.get('Symbol', '')
+                price = row.get('Current Price', 0)
+                dr = row.get('Delta Ratio', -1)
+                gr = row.get('Gamma Ratio', 1)
+                pw = row.get('Put Wall', 0)
+                cw = row.get('Call Wall', 0)
+                hw = row.get('Hedge Wall', 0)
+                oi = row.get('Options Impact', 0)
+                vr = row.get('Volume Ratio', 1)
+                neg = row.get('Next Exp Gamma', 0)
+                
+                # 方向性判断（基于Delta Ratio）
+                # DR = Put Delta / Call Delta (负值)
+                # > -1: 偏多 (Call Delta占优)
+                # < -3: 偏空 (Put Delta占优)
+                if pd.isna(dr):
+                    direction = "❓ 数据缺失"
+                    direction_score = 0
+                elif dr > -1:
+                    direction = "🟢 强力偏多"
+                    direction_score = 2
+                elif dr > -2:
+                    direction = "🟢 偏多"
+                    direction_score = 1
+                elif dr > -3:
+                    direction = "⚪ 中性"
+                    direction_score = 0
+                elif dr > -5:
+                    direction = "🔴 偏空"
+                    direction_score = -1
+                else:
+                    direction = "🔴 强力偏空"
+                    direction_score = -2
+                
+                # Gamma结构判断（基于Gamma Ratio）
+                # GR = Put Gamma / Call Gamma
+                # < 1: Call Gamma主导，上涨加速
+                # > 2: Put Gamma主导，下跌加速
+                if pd.isna(gr):
+                    gamma_struct = "❓"
+                elif gr < 1:
+                    gamma_struct = "📈 Call主导"
+                elif gr < 2:
+                    gamma_struct = "⚖️ 均衡"
+                else:
+                    gamma_struct = "📉 Put主导"
+                
+                # 价格位置判断
+                position = "中间"
+                if price > 0 and cw > 0 and pw > 0:
+                    dist_to_cw = (cw - price) / price * 100
+                    dist_to_pw = (price - pw) / price * 100
+                    
+                    if dist_to_cw < 3:
+                        position = "近CW阻力"
+                    elif dist_to_pw < 3:
+                        position = "近PW支撑"
+                
+                # 波动环境（基于Hedge Wall）
+                vol_env = "未知"
+                if price > 0 and hw > 0:
+                    if price > hw:
+                        vol_env = "均值回归"
+                    else:
+                        vol_env = "趋势/高波动"
+                
+                # 综合信号
+                if direction_score >= 1 and gr < 1.5:
+                    signal = "🟢 做多"
+                    signal_strength = "⭐⭐⭐" if direction_score == 2 else "⭐⭐"
+                elif direction_score <= -1 and gr > 1.5:
+                    signal = "🔴 做空"
+                    signal_strength = "⭐⭐⭐" if direction_score == -2 else "⭐⭐"
+                else:
+                    signal = "⚪ 观望"
+                    signal_strength = "⭐"
+                
+                # 特殊警告
+                warnings = []
+                if neg and neg > 25:
+                    warnings.append(f"⚠️ NEG {neg:.0f}%集中")
+                if vr and vr > 2:
+                    warnings.append(f"📊 高VR={vr:.1f}")
+                
+                return {
+                    'Symbol': symbol,
+                    'Price': price,
+                    'Signal': signal,
+                    'Strength': signal_strength,
+                    'Direction': direction,
+                    'DR': dr,
+                    'GR': gr,
+                    'Gamma结构': gamma_struct,
+                    'Position': position,
+                    'Vol_Env': vol_env,
+                    'PW': pw,
+                    'CW': cw,
+                    'OI%': oi * 100 if oi and oi < 1 else oi,
+                    'Warnings': ', '.join(warnings) if warnings else ''
+                }
+            
+            # 分析所有标的
+            results = []
+            for _, row in eh_df.iterrows():
+                result = analyze_equity(row)
+                if result['Symbol']:
+                    results.append(result)
+            
+            results_df = pd.DataFrame(results)
+            
+            if not results_df.empty:
+                # ===== 统计概览 =====
+                st.subheader("📊 信号统计")
+                
+                bullish = results_df[results_df['Signal'] == '🟢 做多']
+                bearish = results_df[results_df['Signal'] == '🔴 做空']
+                neutral = results_df[results_df['Signal'] == '⚪ 观望']
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("🟢 做多信号", len(bullish))
+                with col2:
+                    st.metric("🔴 做空信号", len(bearish))
+                with col3:
+                    st.metric("⚪ 观望", len(neutral))
+                with col4:
+                    total = len(bullish) + len(bearish)
+                    bull_pct = len(bullish) / total * 100 if total > 0 else 50
+                    st.metric("多空比", f"{bull_pct:.0f}% : {100-bull_pct:.0f}%")
+                
+                # ===== 做多名单 =====
+                st.subheader("🟢 做多信号")
+                if not bullish.empty:
+                    bullish_sorted = bullish.sort_values('Strength', ascending=False)
+                    display_cols = ['Symbol', 'Price', 'Strength', 'Direction', 'DR', 'GR', 
+                                   'Gamma结构', 'Position', 'Vol_Env', 'PW', 'CW', 'Warnings']
+                    st.dataframe(
+                        bullish_sorted[display_cols].round(2),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("无做多信号")
+                
+                # ===== 做空名单 =====
+                st.subheader("🔴 做空信号")
+                if not bearish.empty:
+                    bearish_sorted = bearish.sort_values('Strength', ascending=False)
+                    display_cols = ['Symbol', 'Price', 'Strength', 'Direction', 'DR', 'GR', 
+                                   'Gamma结构', 'Position', 'Vol_Env', 'PW', 'CW', 'Warnings']
+                    st.dataframe(
+                        bearish_sorted[display_cols].round(2),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("无做空信号")
+                
+                # ===== 完整数据表 =====
+                with st.expander("📋 完整分析表"):
+                    st.dataframe(
+                        results_df.round(2),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                
+                # ===== 指标说明 =====
+                with st.expander("📖 指标说明"):
+                    st.markdown("""
+                    **Delta Ratio (DR)** = Put Delta ÷ Call Delta
+                    - DR > -1: 🟢 偏多 (Call Delta占优)
+                    - DR = -1 ~ -3: ⚪ 中性
+                    - DR < -3: 🔴 偏空 (Put Delta占优)
+                    
+                    **Gamma Ratio (GR)** = Put Gamma ÷ Call Gamma
+                    - GR < 1: 📈 Call Gamma主导，上涨时加速
+                    - GR = 1 ~ 2: ⚖️ 均衡
+                    - GR > 2: 📉 Put Gamma主导，下跌时加速
+                    
+                    **综合信号逻辑**
+                    - 🟢 做多: DR偏多 + GR偏Call
+                    - 🔴 做空: DR偏空 + GR偏Put
+                    - ⚪ 观望: 信号矛盾或中性
+                    
+                    **特殊警告**
+                    - ⚠️ NEG集中: Next Exp Gamma > 25%，到期日前后波动大
+                    - 📊 高VR: Volume Ratio > 2，Put成交活跃，可能有反弹潜力
+                    """)
+            else:
+                st.warning("无法解析数据，请检查CSV格式")
+                
+        except Exception as e:
+            st.error(f"解析Equity Hub数据出错: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    elif SPOTGAMMA_AVAILABLE:
+        with st.expander("📈 SpotGamma个股多空分析 (未启用)", expanded=False):
+            st.info("""
+            **如何启用个股分析:**
+            1. 登录 SpotGamma 网站
+            2. 进入 Equity Hub → Data Table
+            3. 选择要分析的标的（如 NDX, IWM, GLD, TLT 等）
+            4. 导出 CSV 文件
+            5. 在左侧边栏上传 Equity Hub CSV
+            
+            **分析内容包括:**
+            - 多空信号判断（基于Delta Ratio + Gamma Ratio）
+            - 价格位置分析（近Call Wall / Put Wall / 中间）
+            - 波动环境判断（均值回归 / 趋势）
+            - 特殊风险警告（Gamma集中、高Volume Ratio）
             """)
     
     # ==================== 附录 ====================
