@@ -1344,47 +1344,49 @@ def main():
                     }
                     filtered_df = filtered_df.rename(columns=column_mapping)
                     
-                    # 辅助函数：解析数值（处理 -1.8B, 1.2M, 41.12%% 等格式）
-                    def parse_sg_value(val):
+                    # 不预处理数值！让spotgamma_analyzer.py的parse_pct和parse_num处理
+                    # 只需要处理特殊格式（如 -1.8B, 1.2M, 978K）
+                    def parse_large_numbers(val):
+                        """只处理B/M/K后缀的大数字，其他保持原样"""
                         if pd.isna(val):
-                            return np.nan
+                            return val
                         val_str = str(val).strip()
-                        val_str = val_str.replace("'", "").replace("$", "").replace(" ", "")
-                        val_str = val_str.replace("%%", "%")
-                        has_percent = '%' in val_str
-                        val_str = val_str.replace("%", "")
                         
+                        # 检查是否有B/M/K后缀
                         multiplier = 1
-                        if val_str.endswith('B'):
-                            multiplier = 1e9
-                            val_str = val_str[:-1]
-                        elif val_str.endswith('M'):
-                            multiplier = 1e6
-                            val_str = val_str[:-1]
-                        elif val_str.endswith('K'):
-                            multiplier = 1e3
-                            val_str = val_str[:-1]
+                        clean_str = val_str.replace(' ', '').replace('$', '')
                         
-                        try:
-                            result = float(val_str) * multiplier
-                            if has_percent and multiplier == 1:
-                                result = result / 100
-                            return result
-                        except:
-                            return np.nan
+                        if clean_str.endswith('B'):
+                            try:
+                                return float(clean_str[:-1]) * 1e9
+                            except:
+                                return val
+                        elif clean_str.endswith('M'):
+                            try:
+                                return float(clean_str[:-1]) * 1e6
+                            except:
+                                return val
+                        elif clean_str.endswith('K'):
+                            try:
+                                return float(clean_str[:-1]) * 1e3
+                            except:
+                                return val
+                        
+                        # 不是大数字格式，保持原样（包括百分比）
+                        return val
                     
-                    # 处理数值列
-                    numeric_cols = ['Current Price', 'Previous Close', 'Call Wall', 'Put Wall', 
-                                   'Hedge Wall', 'Key Gamma Strike', 'Key Delta Strike',
-                                   'Options Impact', 'Gamma Ratio', 'Delta Ratio',
-                                   'Next Exp Gamma', 'Next Exp Delta', 'Volume Ratio',
-                                   'Put/Call OI Ratio', 'Call Gamma', 'Put Gamma',
-                                   'NE Skew', 'Skew', '1 M RV', '1 M IV', 
-                                   'IV Rank', 'Garch Rank', 'Skew Rank', 'Options Implied Move']
+                    # 只处理可能有B/M/K后缀的列
+                    large_number_cols = ['Call Gamma', 'Put Gamma', 'Call Volume', 'Put Volume',
+                                        'Stock Volume', 'Next Exp Call Vol', 'Next Exp Put Vol']
                     
-                    for col in numeric_cols:
+                    for col in large_number_cols:
                         if col in filtered_df.columns:
-                            filtered_df[col] = filtered_df[col].apply(parse_sg_value)
+                            filtered_df[col] = filtered_df[col].apply(parse_large_numbers)
+                    
+                    # 处理双百分号问题（41.12%% → 41.12%）
+                    for col in filtered_df.columns:
+                        if filtered_df[col].dtype == 'object':
+                            filtered_df[col] = filtered_df[col].astype(str).str.replace('%%', '%', regex=False)
                     
                     # 使用过滤后的数据调用parse_spotgamma_csv
                     # 创建一个临时文件对象（模拟上传的文件）
