@@ -56,6 +56,19 @@ try:
 except ImportError:
     SPOTGAMMA_AVAILABLE = False
 
+# 导入黄金宏观预警模块
+try:
+    from gold_alert import (
+        GoldMacroAnalyzer,
+        render_gold_alert_section,
+        get_gold_summary_for_prompt,
+        GoldSignal,
+        AlertLevel,
+    )
+    GOLD_ALERT_AVAILABLE = True
+except ImportError:
+    GOLD_ALERT_AVAILABLE = False
+
 # ==================== 样式 ====================
 
 st.markdown("""
@@ -1201,6 +1214,29 @@ def main():
     us_score_val = scores['us_structure']['score']
     st.metric("🏛️ 美股结构评分", f"{us_score_val:.0f}/100")
     
+    # ==================== 黄金宏观预警 ====================
+    
+    if GOLD_ALERT_AVAILABLE:
+        try:
+            gold_result = render_gold_alert_section(all_data, indicators)
+            # 保存结果供Claude导出使用
+            st.session_state['gold_analysis'] = gold_result
+        except Exception as e:
+            st.warning(f"黄金预警模块加载失败: {e}")
+    else:
+        with st.expander("🥇 黄金宏观预警 (未启用)", expanded=False):
+            st.info("""
+            **黄金宏观预警模块未加载**
+            
+            此模块监控:
+            - 实际利率 (与黄金相关性 -0.82)
+            - DXY美元指数 (与黄金相关性 -0.55)
+            - VIX恐慌指数 (Risk-off时利好黄金)
+            - 三因子相关性状态
+            
+            **启用方法:** 确保 gold_alert.py 在项目目录中
+            """)
+    
     # ==================== 第六章：资金轮动仪表盘 ====================
     
     if ROTATION_SCANNER_AVAILABLE:
@@ -1786,6 +1822,14 @@ def main():
     
     prompt = generate_claude_prompt(indicators, scores, scorer)
     
+    # 添加黄金分析到prompt
+    if GOLD_ALERT_AVAILABLE:
+        try:
+            gold_summary = get_gold_summary_for_prompt(all_data)
+            prompt = prompt + "\n\n" + gold_summary
+        except:
+            pass
+    
     st.markdown("点击下方按钮复制数据摘要，粘贴给Claude进行深度分析：")
     
     with st.expander("📋 查看完整Prompt", expanded=False):
@@ -1793,6 +1837,13 @@ def main():
     
     st.markdown("**📊 快速摘要:**")
     short_summary = generate_short_summary(indicators, scores, scorer)
+    
+    # 添加黄金摘要
+    if GOLD_ALERT_AVAILABLE and 'gold_analysis' in st.session_state:
+        gold_data = st.session_state['gold_analysis']
+        gold_line = f"\n🥇 黄金: {gold_data.get('score', 50)}/100 ({gold_data.get('signal', 'N/A')})"
+        short_summary = short_summary + gold_line
+    
     st.code(short_summary, language="text")
     
     st.markdown("---")
