@@ -24,15 +24,17 @@ from dataclasses import dataclass
 import json
 
 # ============================================================================
-# 配置 - 修改这里
+# 配置 - 从环境变量读取，本地运行可硬编码
 # ============================================================================
 
-FINNHUB_API_KEY = "d732oopr01qn7f07d8lgd732oopr01qn7f07d8m0"
-TELEGRAM_BOT_TOKEN = "8248072555:AAHkwoaABdhH_hTY_4PnNUtHNBgjNHtm3rs"
-TELEGRAM_CHAT_ID = "1821401964"
+import os
+
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd732oopr01qn7f07d8lgd732oopr01qn7f07d8m0')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8248072555:AAHkwoaABdhH_hTY_4PnNUtHNBgjNHtm3rs')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '1821401964')
 
 # 刷新间隔（秒）
-REFRESH_INTERVAL = 600  # 5分钟
+REFRESH_INTERVAL = 300  # 5分钟
 
 # 是否推送每日摘要
 SEND_DAILY_SUMMARY = True
