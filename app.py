@@ -69,6 +69,17 @@ try:
 except ImportError:
     GOLD_ALERT_AVAILABLE = False
 
+# 导入新闻情绪模块
+try:
+    from news_sentiment_module import (
+        render_news_sentiment_section,
+        get_news_sentiment_for_prompt,
+        NewsSentimentModule,
+    )
+    NEWS_SENTIMENT_AVAILABLE = True
+except ImportError:
+    NEWS_SENTIMENT_AVAILABLE = False
+
 # ==================== 样式 ====================
 
 st.markdown("""
@@ -643,6 +654,29 @@ def main():
                 if st.button("🗑️ 清除Equity Hub数据", key="clear_equity_hub"):
                     del st.session_state['equity_hub_file']
                     st.rerun()
+        
+        # ==================== 新闻情绪配置 ====================
+        if NEWS_SENTIMENT_AVAILABLE:
+            st.divider()
+            st.subheader("📰 新闻情绪配置")
+            st.caption("实时新闻情绪监控 + Telegram推送")
+            
+            tg_enabled = st.checkbox("启用Telegram预警推送", value=False, key="tg_enabled")
+            
+            if tg_enabled:
+                tg_token = st.text_input("Bot Token", type="password", key="tg_token",
+                                        help="从BotFather获取")
+                tg_chat = st.text_input("Chat ID", key="tg_chat",
+                                       help="你的Telegram Chat ID")
+                
+                if tg_token and tg_chat:
+                    st.session_state['telegram_config'] = {
+                        'enabled': True,
+                        'bot_token': tg_token,
+                        'chat_id': tg_chat,
+                        'webhook_url': None
+                    }
+                    st.success("✅ Telegram已配置")
     
     with st.spinner("正在加载数据..."):
         all_data = load_data()
@@ -1513,10 +1547,163 @@ def main():
             - **Next Exp Gamma >25%**: 短期头寸集中，到期前后易剧烈波动
             """)
     
-    # ==================== 第八章：SpotGamma个股多空分析 ====================
+    # ==================== 第八章：新闻情绪监控 ====================
+    
+    if NEWS_SENTIMENT_AVAILABLE:
+        # 获取Gamma环境 (如果SpotGamma数据可用)
+        gamma_env = None
+        if 'spotgamma_analysis' in st.session_state:
+            sg_data = st.session_state['spotgamma_analysis']
+            if sg_data.get('gamma_environment') == 'positive':
+                gamma_env = 'positive'
+            else:
+                gamma_env = 'negative'
+        
+        # 修改标题为第八章
+        st.markdown('<div class="chapter-header">📰 第八章：新闻情绪监控</div>', unsafe_allow_html=True)
+        st.markdown('*"市场在讨论什么? 情绪如何? 地缘风险升温了吗?"*')
+        
+        # 初始化模块
+        if 'news_sentiment_module' not in st.session_state:
+            # 检查是否有Telegram配置
+            tg_config = st.session_state.get('telegram_config', {'enabled': False})
+            from news_sentiment_module import NewsSentimentModule
+            st.session_state.news_sentiment_module = NewsSentimentModule(telegram_config=tg_config)
+        
+        module = st.session_state.news_sentiment_module
+        
+        # 控制面板
+        col1, col2, col3 = st.columns([2, 2, 1])
+        
+        with col1:
+            news_auto_refresh = st.checkbox("自动刷新 (5分钟)", value=False, key="news_auto_refresh")
+        
+        with col2:
+            news_include_tickers = st.checkbox("包含关注标的", value=True, key="news_include_tickers")
+        
+        with col3:
+            if st.button("🔄 刷新新闻", key="news_refresh_btn"):
+                with st.spinner("正在获取新闻数据..."):
+                    module.fetch_and_analyze_news(include_tickers=news_include_tickers)
+                    st.success(f"已更新 {len(module.news_cache)} 条新闻")
+        
+        # 自动刷新逻辑
+        if news_auto_refresh:
+            from datetime import datetime, timedelta
+            if module.last_update is None or \
+               (datetime.now() - module.last_update).seconds > 300:
+                module.fetch_and_analyze_news(include_tickers=news_include_tickers)
+        
+        # 如果有数据，渲染面板
+        if module.news_cache:
+            from news_sentiment_module import (
+                render_sentiment_gauge, 
+                render_category_chart, 
+                render_sentiment_timeline,
+                render_alerts_panel,
+                render_news_table,
+                MACRO_KEYWORDS
+            )
+            
+            # 预警面板
+            if module.alerts:
+                st.markdown("### 🚨 实时预警")
+                render_alerts_panel(module.alerts)
+                st.markdown("---")
+            
+            # 核心指标
+            summary = module.get_sentiment_summary()
+            
+            if summary:
+                cols = st.columns(5)
+                
+                with cols[0]:
+                    avg_sent = summary['avg_sentiment']
+                    delta_display = "📈 偏多" if avg_sent > 0.1 else "📉 偏空" if avg_sent < -0.1 else "➡️ 中性"
+                    st.metric("24h情绪", f"{avg_sent:.2f}", delta_display)
+                
+                with cols[1]:
+                    st.metric("新闻总数", summary['total_news'])
+                
+                with cols[2]:
+                    st.metric("🟢 看涨", summary['bullish_count'])
+                
+                with cols[3]:
+                    st.metric("🔴 看跌", summary['bearish_count'])
+                
+                with cols[4]:
+                    # Gamma融合信号
+                    if gamma_env:
+                        fusion = module.get_gamma_fusion_signal(gamma_env)
+                        st.metric("综合风险", fusion['level'], 
+                                 help=f"{fusion['message']}\n建议: {fusion['action']}")
+                    else:
+                        st.metric("⚪ 中性", summary['neutral_count'])
+            
+            # 可视化
+            col_left, col_right = st.columns(2)
+            
+            with col_left:
+                if summary:
+                    gauge_fig = render_sentiment_gauge(summary['avg_sentiment'], "24小时市场情绪")
+                    st.plotly_chart(gauge_fig, use_container_width=True)
+            
+            with col_right:
+                category_df = module.get_category_breakdown()
+                if not category_df.empty:
+                    cat_fig = render_category_chart(category_df)
+                    st.plotly_chart(cat_fig, use_container_width=True)
+            
+            # 时间线图
+            with st.expander("📈 情绪时间线", expanded=False):
+                timeline_fig = render_sentiment_timeline(module.news_cache)
+                st.plotly_chart(timeline_fig, use_container_width=True)
+            
+            # 新闻列表
+            with st.expander("📋 最新新闻", expanded=False):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    sentiment_filter = st.selectbox(
+                        "情绪筛选",
+                        ["全部", "看涨 (>0.2)", "看跌 (<-0.2)", "中性"],
+                        key="news_sentiment_filter"
+                    )
+                
+                with col2:
+                    category_filter = st.selectbox(
+                        "类别筛选", 
+                        ["全部"] + [v['category_cn'] for v in MACRO_KEYWORDS.values()],
+                        key="news_category_filter"
+                    )
+                
+                filtered_news = module.news_cache.copy()
+                
+                if sentiment_filter == "看涨 (>0.2)":
+                    filtered_news = [n for n in filtered_news if n.sentiment_score > 0.2]
+                elif sentiment_filter == "看跌 (<-0.2)":
+                    filtered_news = [n for n in filtered_news if n.sentiment_score < -0.2]
+                elif sentiment_filter == "中性":
+                    filtered_news = [n for n in filtered_news if -0.2 <= n.sentiment_score <= 0.2]
+                
+                if category_filter != "全部":
+                    cat_key = [k for k, v in MACRO_KEYWORDS.items() if v['category_cn'] == category_filter]
+                    if cat_key:
+                        filtered_news = [n for n in filtered_news if cat_key[0] in n.macro_categories]
+                
+                st.markdown(f"*显示 {len(filtered_news)} 条新闻*")
+                render_news_table(filtered_news)
+            
+            # 底部信息
+            st.caption(f"最后更新: {module.last_update.strftime('%Y-%m-%d %H:%M:%S') if module.last_update else 'N/A'} | "
+                       f"API调用: {module.client.request_count} | Finnhub")
+        else:
+            st.info("👆 点击刷新按钮获取最新新闻数据")
+    
+    # ==================== 第九章：SpotGamma个股多空分析 ====================
     
     if SPOTGAMMA_AVAILABLE and 'equity_hub_file' in st.session_state:
-        st.markdown('<div class="chapter-header">📈 第八章：SpotGamma个股多空分析</div>', unsafe_allow_html=True)
+        st.markdown('<div class="chapter-header">📈 第九章：SpotGamma个股多空分析</div>', unsafe_allow_html=True)
         st.markdown('*"哪些标的期权结构偏多？哪些偏空？做市商在押注什么？"*')
         
         equity_hub_file = st.session_state['equity_hub_file']
@@ -1830,6 +2017,15 @@ def main():
         except:
             pass
     
+    # 添加新闻情绪到prompt
+    if NEWS_SENTIMENT_AVAILABLE and 'news_sentiment_module' in st.session_state:
+        try:
+            news_summary = get_news_sentiment_for_prompt(st.session_state.news_sentiment_module)
+            if news_summary:
+                prompt = prompt + "\n\n" + news_summary
+        except:
+            pass
+    
     st.markdown("点击下方按钮复制数据摘要，粘贴给Claude进行深度分析：")
     
     with st.expander("📋 查看完整Prompt", expanded=False):
@@ -1843,6 +2039,17 @@ def main():
         gold_data = st.session_state['gold_analysis']
         gold_line = f"\n🥇 黄金: {gold_data.get('score', 50)}/100 ({gold_data.get('signal', 'N/A')})"
         short_summary = short_summary + gold_line
+    
+    # 添加新闻情绪摘要
+    if NEWS_SENTIMENT_AVAILABLE and 'news_sentiment_module' in st.session_state:
+        module = st.session_state.news_sentiment_module
+        if module.news_cache:
+            summary = module.get_sentiment_summary()
+            if summary:
+                avg_sent = summary['avg_sentiment']
+                sent_desc = "偏多" if avg_sent > 0.2 else "偏空" if avg_sent < -0.2 else "中性"
+                news_line = f"\n📰 新闻情绪: {avg_sent:.2f} ({sent_desc})"
+                short_summary = short_summary + news_line
     
     st.code(short_summary, language="text")
     
