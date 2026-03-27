@@ -34,15 +34,16 @@ import hashlib
 # 配置常量
 # ============================================================================
 
-# Finnhub API Key (你的key)
-FINNHUB_API_KEY = "d731rl1r01qn7f07ak4gd731rl1r01qn7f07ak50"
+# Finnhub API Key (从环境变量读取)
+import os
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
 
-# Telegram配置 (Alex的Bot)
+# Telegram配置 (从环境变量读取)
 TELEGRAM_CONFIG = {
-    'enabled': True,
+    'enabled': bool(os.environ.get('TELEGRAM_BOT_TOKEN')),
     'webhook_url': None,
-    'bot_token': '8248072555:AAHkwoaABdhH_hTY_4PnNUtHNBgjNHtm3rs',
-    'chat_id': '1821401964',
+    'bot_token': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
+    'chat_id': os.environ.get('TELEGRAM_CHAT_ID', ''),
 }
 
 class SentimentLevel(Enum):
