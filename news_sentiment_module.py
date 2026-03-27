@@ -302,13 +302,19 @@ class FinnhubClient:
         url = f"{self.BASE_URL}/{endpoint}"
         
         try:
-            response = self.session.get(url, params=params, timeout=10)
+            response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
             self.request_count += 1
             self.last_request_time = datetime.now()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"API请求失败: {e}")
+            # 在Streamlit中显示错误
+            import streamlit as st
+            st.error(f"Finnhub API请求失败: {e}")
+            return {}
+        except Exception as e:
+            import streamlit as st
+            st.error(f"未知错误: {e}")
             return {}
     
     def get_market_news(self, category: str = 'general') -> List[dict]:
