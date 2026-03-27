@@ -354,6 +354,7 @@ class NewsAlertBot:
     def run_once(self):
         """执行一次检查"""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 检查新闻...")
+        self.send_telegram("🔄 *新闻检查完成*\n\n正在分析中...")
         
         # 获取新闻
         raw_news = self.fetch_news()
