@@ -677,6 +677,8 @@ def main():
                         'webhook_url': None
                     }
                     st.success("✅ Telegram已配置")
+            else:
+                st.session_state['telegram_config'] = {'enabled': False}
     
     with st.spinner("正在加载数据..."):
         all_data = load_data()
