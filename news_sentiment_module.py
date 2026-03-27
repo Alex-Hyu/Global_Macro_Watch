@@ -34,9 +34,9 @@ import hashlib
 # 配置常量
 # ============================================================================
 
-# Finnhub API Key (从环境变量读取)
+# Finnhub API Key (从环境变量读取，带默认值)
 import os
-FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY') or "d732oopr01qn7f07d8lgd732oopr01qn7f07d8m0"
 
 # Telegram配置 (从环境变量读取)
 TELEGRAM_CONFIG = {
