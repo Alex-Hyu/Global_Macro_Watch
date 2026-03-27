@@ -3,14 +3,13 @@
 News Sentiment Alert - Background Monitor
 
 功能：
-- 每5分钟获取最新新闻
+- 每15分钟获取最新新闻
 - 分析情绪和关键词
-- 有HIGH/EXTREME预警时推送Telegram
+- 推送重要新闻headlines (Fed/地缘/MAG7/宏观数据)
+- 有HIGH/EXTREME预警时特别提醒
 
 部署方式：
-1. 本地运行: python news_alert_bot.py
-2. 服务器: nohup python news_alert_bot.py &
-3. GitHub Actions: 见下方配置
+1. GitHub Actions: 每15分钟自动运行
 
 作者: Alex's Trading System
 """
@@ -22,12 +21,11 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import json
+import os
 
 # ============================================================================
 # 配置 - 从环境变量读取（GitHub Secrets）
 # ============================================================================
-
-import os
 
 FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
@@ -47,27 +45,48 @@ DAILY_SUMMARY_HOUR = 8  # 早上8点发送
 MACRO_KEYWORDS = {
     'fed_policy': {
         'keywords': ['fed', 'fomc', 'powell', 'rate cut', 'rate hike', 'hawkish', 'dovish', 
-                     'federal reserve', 'monetary policy'],
+                     'federal reserve', 'monetary policy', 'quantitative', 'tightening', 'easing'],
         'weight': 1.5,
-        'emoji': '🏦'
+        'emoji': '🏦',
+        'always_push': True
     },
     'economic_data': {
         'keywords': ['cpi', 'ppi', 'nfp', 'jobs report', 'unemployment', 'gdp', 'retail sales',
-                     'pce', 'inflation', 'jobless claims', 'payroll'],
+                     'pce', 'inflation', 'jobless claims', 'payroll', 'consumer confidence', 
+                     'ism', 'manufacturing pmi', 'services pmi'],
         'weight': 1.3,
-        'emoji': '📊'
+        'emoji': '📊',
+        'always_push': True
     },
     'geopolitical': {
-        'keywords': ['iran', 'china', 'russia', 'ukraine', 'taiwan', 'tariff', 'sanctions',
-                     'war', 'military', 'missile', 'attack', 'tension', 'israel', 'gaza'],
+        'keywords': ['iran', 'china trade', 'russia', 'ukraine', 'taiwan', 'tariff', 'sanctions',
+                     'war', 'military', 'missile', 'attack', 'tension', 'israel', 'gaza', 
+                     'north korea', 'strike', 'retaliation', 'conflict'],
         'weight': 1.8,
-        'emoji': '🌍'
+        'emoji': '🌍',
+        'always_push': True
     },
     'market_structure': {
         'keywords': ['vix', 'volatility', 'squeeze', 'margin call', 'liquidation', 
-                     'options', 'gamma', 'expiration'],
+                     'options', 'gamma', 'expiration', '0dte'],
         'weight': 1.4,
-        'emoji': '📈'
+        'emoji': '📈',
+        'always_push': False
+    },
+    'mag7': {
+        'keywords': ['nvidia', 'nvda', 'apple', 'aapl', 'microsoft', 'msft', 'google', 'googl', 
+                     'alphabet', 'amazon', 'amzn', 'meta', 'facebook', 'tesla', 'tsla'],
+        'weight': 1.3,
+        'emoji': '🏢',
+        'always_push': True
+    },
+    'major_market': {
+        'keywords': ['s&p 500', 'sp500', 'nasdaq', 'dow jones', 'russell', 'qqq', 'spy',
+                     'treasury', 'bond yield', '10-year', 'yield curve', 'inversion',
+                     'bull market', 'bear market', 'correction', 'crash', 'rally'],
+        'weight': 1.2,
+        'emoji': '📉',
+        'always_push': True
     },
 }
 
@@ -105,7 +124,7 @@ class Alert:
 
 class NewsAlertBot:
     def __init__(self):
-        self.sent_alerts = set()  # 已发送的预警hash，避免重复
+        self.sent_alerts = set()
         self.last_summary_date = None
         
     def fetch_news(self) -> List[dict]:
@@ -113,16 +132,15 @@ class NewsAlertBot:
         url = "https://finnhub.io/api/v1/news"
         params = {'category': 'general', 'token': FINNHUB_API_KEY}
         
-        # 重试3次
         for attempt in range(3):
             try:
-                response = requests.get(url, params=params, timeout=30)  # 超时改为30秒
+                response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 return response.json()[:30]
             except Exception as e:
                 print(f"[WARN] 获取新闻失败 (尝试 {attempt+1}/3): {e}")
                 if attempt < 2:
-                    time.sleep(5)  # 等5秒再试
+                    time.sleep(5)
         
         return []
     
@@ -162,7 +180,6 @@ class NewsAlertBot:
             sentiment = self.analyze_sentiment(headline)
             categories = self.detect_categories(headline)
             
-            # 重要性评分
             importance = 5.0 + abs(sentiment) * 2
             for cat in categories:
                 importance += MACRO_KEYWORDS.get(cat, {}).get('weight', 0)
@@ -186,7 +203,6 @@ class NewsAlertBot:
         if not news_items:
             return alerts
         
-        # 过滤最近4小时的新闻
         recent = [n for n in news_items 
                   if n.datetime > datetime.now() - timedelta(hours=4)]
         
@@ -254,103 +270,7 @@ class NewsAlertBot:
         """生成预警hash用于去重"""
         content = f"{alert.level}_{alert.message}_{datetime.now().strftime('%Y%m%d%H')}"
         return hashlib.md5(content.encode()).hexdigest()[:16]
-    
-    def send_alert(self, alert: Alert) -> bool:
-        """发送预警（带去重）"""
-        alert_hash = self.get_alert_hash(alert)
-        
-        if alert_hash in self.sent_alerts:
-            return False
-        
-        message = f"""
-*📰 新闻情绪预警*
 
-*级别:* {alert.level}
-*信号:* {alert.message}
-*原因:* {alert.reason}
-*时间:* {datetime.now().strftime('%H:%M')}
-"""
-        
-        if alert.news:
-            message += "\n*相关新闻:*\n"
-            for headline in alert.news:
-                message += f"• {headline}...\n"
-        
-        if self.send_telegram(message):
-            self.sent_alerts.add(alert_hash)
-            # 限制缓存大小
-            if len(self.sent_alerts) > 500:
-                self.sent_alerts = set(list(self.sent_alerts)[-250:])
-            return True
-        
-        return False
-    
-    def send_daily_summary(self, news_items: List[NewsItem]):
-        """发送每日摘要"""
-        if not news_items:
-            return
-        
-        today = datetime.now().date()
-        if self.last_summary_date == today:
-            return
-        
-        if datetime.now().hour != DAILY_SUMMARY_HOUR:
-            return
-        
-        recent = [n for n in news_items 
-                  if n.datetime > datetime.now() - timedelta(hours=24)]
-        
-        if not recent:
-            return
-        
-        avg_sent = sum(n.sentiment_score for n in recent) / len(recent)
-        bullish = sum(1 for n in recent if n.sentiment_score > 0.2)
-        bearish = sum(1 for n in recent if n.sentiment_score < -0.2)
-        
-        if avg_sent > 0.2:
-            emoji = "📈"
-            mood = "偏多"
-        elif avg_sent < -0.2:
-            emoji = "📉"
-            mood = "偏空"
-        else:
-            emoji = "➡️"
-            mood = "中性"
-        
-        # 统计类别
-        cat_counts = {}
-        for n in recent:
-            for cat in n.categories:
-                cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        
-        top_cats = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-        cat_text = ", ".join([f"{MACRO_KEYWORDS[c[0]]['emoji']}{c[1]}条" for c in top_cats])
-        
-        # 重要新闻
-        important = sorted(recent, key=lambda x: x.importance, reverse=True)[:3]
-        
-        message = f"""
-*📰 每日新闻情绪摘要*
-
-{emoji} *整体情绪:* {mood} ({avg_sent:.2f})
-
-*24h统计:*
-• 新闻数: {len(recent)}
-• 看涨: {bullish} | 看跌: {bearish}
-• 热点: {cat_text if cat_text else '无明显集中'}
-
-*重要新闻:*
-"""
-        for n in important:
-            sent_emoji = "🟢" if n.sentiment_score > 0.2 else "🔴" if n.sentiment_score < -0.2 else "🟡"
-            message += f"{sent_emoji} {n.headline[:45]}...\n"
-        
-        message += f"\n_生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}_"
-        
-        if self.send_telegram(message):
-            self.last_summary_date = today
-            print(f"[INFO] 每日摘要已发送")
-    
     def run_once(self):
         """执行一次检查"""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 检查新闻...")
@@ -372,14 +292,6 @@ class NewsAlertBot:
         recent = [n for n in news_items if n.datetime > datetime.now() - timedelta(hours=4)]
         avg_sent = sum(n.sentiment_score for n in recent) / len(recent) if recent else 0
         
-        # 发送预警（HIGH/EXTREME）
-        alert_sent = False
-        for alert in alerts:
-            if alert.level in ['HIGH', 'EXTREME']:
-                if self.send_alert(alert):
-                    print(f"[ALERT] 已发送: {alert.message}")
-                    alert_sent = True
-        
         # 筛选重要新闻（Fed/地缘/MAG7/宏观数据）
         important_news = []
         for n in recent:
@@ -396,7 +308,7 @@ class NewsAlertBot:
                 seen_headlines.add(n.headline)
                 unique_important.append(n)
         
-        # 构建消息
+        # 构建情绪描述
         if avg_sent > 0.2:
             emoji = "📈"
             mood = "偏多"
@@ -407,35 +319,47 @@ class NewsAlertBot:
             emoji = "➡️"
             mood = "中性"
         
-        message = f"""📰 *新闻情绪快报*
+        # 构建重要新闻部分
+        important_section = ""
+        if unique_important:
+            important_section = "\n*📌 重要新闻:*\n"
+            for n in unique_important[:8]:
+                cat_emojis = [MACRO_KEYWORDS.get(c, {}).get('emoji', '') for c in n.categories if MACRO_KEYWORDS.get(c, {}).get('always_push', False)]
+                cat_str = ''.join(cat_emojis[:2])
+                sent_emoji = "🟢" if n.sentiment_score > 0.2 else "🔴" if n.sentiment_score < -0.2 else "🟡"
+                important_section += f"{cat_str}{sent_emoji} {n.headline[:55]}...\n"
+        
+        # 检查是否有HIGH/EXTREME预警
+        high_alerts = [a for a in alerts if a.level in ['HIGH', 'EXTREME']]
+        
+        if high_alerts:
+            # 有预警：发送预警+重要新闻
+            alert = high_alerts[0]  # 取最重要的一个
+            message = f"""🚨 *新闻情绪预警*
+
+*级别:* {alert.level}
+*信号:* {alert.message}
+*原因:* {alert.reason}
 
 {emoji} 情绪: {mood} ({avg_sent:.2f})
 📊 新闻: {len(recent)}条 | 重要: {len(unique_important)}条
 ⏰ {datetime.now().strftime('%H:%M')} UTC
-"""
-        
-        # 添加重要新闻headlines
-        if unique_important:
-            message += "\n*📌 重要新闻:*\n"
-            for n in unique_important[:8]:  # 最多8条
-                # 类别emoji
-                cat_emojis = [MACRO_KEYWORDS.get(c, {}).get('emoji', '') for c in n.categories if MACRO_KEYWORDS.get(c, {}).get('always_push', False)]
-                cat_str = ''.join(cat_emojis[:2])
-                
-                # 情绪emoji
-                sent_emoji = "🟢" if n.sentiment_score > 0.2 else "🔴" if n.sentiment_score < -0.2 else "🟡"
-                
-                message += f"{cat_str}{sent_emoji} {n.headline[:55]}...\n"
+{important_section if important_section else ''}"""
+            
+            self.send_telegram(message)
+            print(f"[ALERT] 已发送预警+新闻")
         else:
-            message += "\n_无重要宏观新闻_"
-        
-        self.send_telegram(message)
-        print(f"[INFO] 已发送摘要，包含 {len(unique_important)} 条重要新闻")
-        
-        # 每日摘要
-        if SEND_DAILY_SUMMARY:
-            self.send_daily_summary(news_items)
-    
+            # 无预警：发送摘要+重要新闻
+            message = f"""📰 *新闻情绪快报*
+
+{emoji} 情绪: {mood} ({avg_sent:.2f})
+📊 新闻: {len(recent)}条 | 重要: {len(unique_important)}条
+⏰ {datetime.now().strftime('%H:%M')} UTC
+{important_section if important_section else '_无重要宏观新闻_'}"""
+            
+            self.send_telegram(message)
+            print(f"[INFO] 已发送摘要，包含 {len(unique_important)} 条重要新闻")
+
     def run_forever(self):
         """持续运行"""
         print("=" * 50)
@@ -444,8 +368,7 @@ class NewsAlertBot:
         print(f"📱 Telegram: {TELEGRAM_CHAT_ID}")
         print("=" * 50)
         
-        # 启动测试消息
-        self.send_telegram("🤖 *新闻预警机器人已启动*\n\n每5分钟检查一次，有HIGH/EXTREME预警会推送。")
+        self.send_telegram("🤖 *新闻预警机器人已启动*\n\n每15分钟检查一次，有重要新闻会推送。")
         
         while True:
             try:
@@ -463,10 +386,8 @@ class NewsAlertBot:
 if __name__ == "__main__":
     bot = NewsAlertBot()
     
-    # 单次运行（用于GitHub Actions）
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == '--once':
         bot.run_once()
     else:
-        # 持续运行
         bot.run_forever()
