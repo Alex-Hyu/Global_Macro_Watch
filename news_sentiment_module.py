@@ -1080,7 +1080,7 @@ def render_news_sentiment_section(gamma_environment: str = None):
 
 def get_news_sentiment_for_prompt(module: NewsSentimentModule = None) -> str:
     """
-    生成新闻情绪摘要供Claude Prompt使用
+    生成新闻情绪摘要供Claude Prompt使用（简要版）
     """
     if module is None:
         if 'news_sentiment_module' not in st.session_state:
@@ -1128,6 +1128,225 @@ def get_news_sentiment_for_prompt(module: NewsSentimentModule = None) -> str:
 {alerts_text if alerts_text else "  - 无预警"}
 """
     return prompt_section
+
+
+def generate_claude_news_analysis_prompt(module: NewsSentimentModule = None, 
+                                         gamma_environment: str = None,
+                                         include_full_headlines: bool = True,
+                                         max_headlines: int = 30) -> str:
+    """
+    生成完整的Claude新闻分析Prompt
+    包含所有headlines，让Claude进行深度情绪分析
+    
+    参数:
+    - module: NewsSentimentModule实例
+    - gamma_environment: 'positive' 或 'negative'
+    - include_full_headlines: 是否包含完整headline列表
+    - max_headlines: 最多包含多少条headlines
+    
+    返回:
+    - 完整的Claude分析Prompt字符串
+    """
+    if module is None:
+        if 'news_sentiment_module' not in st.session_state:
+            return "请先刷新新闻数据"
+        module = st.session_state.news_sentiment_module
+    
+    if not module.news_cache:
+        return "请先刷新新闻数据"
+    
+    # 获取统计数据
+    summary = module.get_sentiment_summary()
+    category_df = module.get_category_breakdown()
+    
+    # 当前时间
+    now = datetime.now()
+    
+    # ===== 构建Prompt =====
+    
+    prompt = f"""# 📰 新闻情绪深度分析请求
+
+**分析时间:** {now.strftime('%Y-%m-%d %H:%M')} EST
+**数据来源:** Finnhub API
+**新闻数量:** {len(module.news_cache)} 条
+
+---
+
+## 📊 基础统计 (机器预处理)
+
+| 指标 | 数值 |
+|------|------|
+| 24h新闻总数 | {summary.get('total_news', 0)} |
+| 机器判定看涨 | {summary.get('bullish_count', 0)} |
+| 机器判定看跌 | {summary.get('bearish_count', 0)} |
+| 机器判定中性 | {summary.get('neutral_count', 0)} |
+| 机器平均得分 | {summary.get('avg_sentiment', 0):.3f} (-1到1) |
+
+**注意:** 以上机器得分基于简单关键词匹配，准确度有限，请以你的分析为准。
+
+---
+
+## 🏷️ 类别分布
+
+"""
+    
+    # 添加类别统计
+    if not category_df.empty:
+        for cat_name, row in category_df.iterrows():
+            emoji = row.get('emoji', '📌')
+            count = int(row.get('count', 0))
+            avg_sent = row.get('avg_sentiment', 0)
+            prompt += f"- **{emoji} {cat_name}**: {count}条, 机器情绪={avg_sent:.2f}\n"
+    else:
+        prompt += "- 无明显类别集中\n"
+    
+    # 添加Gamma环境上下文
+    if gamma_environment:
+        prompt += f"""
+---
+
+## 🎯 当前市场环境
+
+**Gamma环境:** {'正Gamma (Positive)' if gamma_environment == 'positive' else '负Gamma (Negative)'}
+
+{'- 正Gamma = 做市商倾向于均值回归对冲，波动受抑制' if gamma_environment == 'positive' else '- 负Gamma = 做市商顺势对冲，波动放大'}
+{'- Zero Gamma和Put Wall是关键支撑位' if gamma_environment == 'positive' else '- 突破关键位后可能加速运动'}
+"""
+    
+    # 添加预警
+    if module.alerts:
+        prompt += """
+---
+
+## 🚨 机器预警 (仅供参考)
+
+"""
+        for alert in module.alerts:
+            level_emoji = {'EXTREME': '🔴🔴', 'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}.get(alert.level, '⚪')
+            prompt += f"- {level_emoji} **{alert.message}**: {alert.trigger_reason}\n"
+    
+    # 添加完整headlines
+    if include_full_headlines:
+        prompt += f"""
+---
+
+## 📋 完整新闻Headlines (请分析)
+
+以下是最近{min(max_headlines, len(module.news_cache))}条新闻的完整headline，请你：
+
+1. **重新判断每条新闻的真实情绪** (看涨/看跌/中性)
+2. **识别市场主要关注点** (Fed? 地缘? 财报? 其他?)
+3. **评估整体市场情绪** 
+4. **给出对QQQ/SPY短期走势的影响判断**
+5. **结合Gamma环境给出交易建议**
+
+---
+
+"""
+        # 按时间排序，最新的在前
+        sorted_news = sorted(module.news_cache, key=lambda x: x.datetime, reverse=True)
+        
+        for i, news in enumerate(sorted_news[:max_headlines], 1):
+            time_str = news.datetime.strftime('%m-%d %H:%M')
+            categories = ', '.join([MACRO_KEYWORDS.get(c, {}).get('category_cn', c) for c in news.macro_categories[:2]])
+            cat_display = f" [{categories}]" if categories else ""
+            
+            prompt += f"{i}. **[{time_str}]** {news.headline}{cat_display}\n"
+            
+            # 如果有摘要且不太长，也包含
+            if news.summary and len(news.summary) > 20:
+                summary_short = news.summary[:150] + "..." if len(news.summary) > 150 else news.summary
+                prompt += f"   _{summary_short}_\n"
+            prompt += "\n"
+    
+    # 添加分析指引
+    prompt += """
+---
+
+## 🤖 请你分析
+
+请基于以上新闻headlines进行深度分析，回答以下问题：
+
+### 1. 情绪判断
+- 整体市场情绪是什么？(强烈看涨/看涨/中性/看跌/强烈看跌)
+- 与机器判断有何差异？为什么？
+
+### 2. 主题识别
+- 市场当前最关注什么话题？
+- 有哪些潜在风险被新闻提及？
+- 有哪些利好信号？
+
+### 3. 关键新闻
+- 哪3-5条新闻最重要？为什么？
+- 有没有新闻被误判情绪的？
+
+### 4. 交易影响
+- 这些新闻对今日QQQ/SPY走势有何影响？
+- 结合当前Gamma环境，有什么交易建议？
+
+### 5. 风险提示
+- 需要特别关注哪些风险？
+- 有没有"灰犀牛"或"黑天鹅"信号？
+
+---
+*请用中文回答，保持简洁但有洞察力*
+"""
+    
+    return prompt
+
+
+def render_claude_analysis_button(module: NewsSentimentModule = None, 
+                                  gamma_environment: str = None):
+    """
+    渲染"复制到Claude分析"按钮
+    """
+    if module is None:
+        if 'news_sentiment_module' not in st.session_state:
+            return
+        module = st.session_state.news_sentiment_module
+    
+    if not module.news_cache:
+        return
+    
+    st.markdown("### 🤖 Claude深度分析")
+    st.markdown("点击下方按钮生成完整分析Prompt，复制后发送给Claude进行深度情绪分析：")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        max_news = st.slider("包含新闻数量", min_value=10, max_value=50, value=25, key="claude_news_count")
+    
+    with col2:
+        include_summary = st.checkbox("包含新闻摘要", value=True, key="claude_include_summary")
+    
+    # 生成Prompt
+    prompt = generate_claude_news_analysis_prompt(
+        module=module,
+        gamma_environment=gamma_environment,
+        include_full_headlines=True,
+        max_headlines=max_news
+    )
+    
+    with st.expander("📋 查看/复制完整Prompt", expanded=False):
+        st.code(prompt, language="markdown")
+        st.caption(f"Prompt长度: {len(prompt)} 字符 | 约 {len(prompt)//4} tokens")
+    
+    # 快速摘要版本
+    st.markdown("**📊 快速摘要 (精简版):**")
+    
+    summary = module.get_sentiment_summary()
+    if summary:
+        top_headlines = sorted(module.news_cache, key=lambda x: x.importance_score, reverse=True)[:5]
+        quick_summary = f"""📰 新闻情绪快报 | {datetime.now().strftime('%m-%d %H:%M')}
+情绪: {summary['avg_sentiment']:.2f} | 看涨{summary['bullish_count']} 看跌{summary['bearish_count']}
+{'Gamma: ' + gamma_environment if gamma_environment else ''}
+
+重要新闻:
+"""
+        for i, news in enumerate(top_headlines, 1):
+            quick_summary += f"{i}. {news.headline[:60]}...\n"
+        
+        st.code(quick_summary, language="text")
 
 
 # ============================================================================

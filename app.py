@@ -1695,6 +1695,31 @@ def main():
                 st.markdown(f"*显示 {len(filtered_news)} 条新闻*")
                 render_news_table(filtered_news)
             
+            # ===== Claude深度分析 =====
+            st.markdown("---")
+            from news_sentiment_module import generate_claude_news_analysis_prompt
+            
+            st.markdown("### 🤖 Claude深度分析")
+            st.markdown("机器情绪打分基于简单关键词匹配，准确度有限。点击下方生成完整Prompt，复制发送给Claude进行**真正的深度情绪分析**：")
+            
+            col_a, col_b = st.columns([1, 1])
+            with col_a:
+                max_news_count = st.slider("包含新闻数量", min_value=10, max_value=50, value=25, key="claude_news_slider")
+            with col_b:
+                st.caption(f"当前共 {len(module.news_cache)} 条新闻")
+            
+            # 生成Prompt
+            claude_prompt = generate_claude_news_analysis_prompt(
+                module=module,
+                gamma_environment=gamma_env,
+                include_full_headlines=True,
+                max_headlines=max_news_count
+            )
+            
+            with st.expander("📋 查看/复制完整Claude Prompt", expanded=False):
+                st.code(claude_prompt, language="markdown")
+                st.caption(f"Prompt长度: {len(claude_prompt)} 字符 | 约 {len(claude_prompt)//4} tokens")
+            
             # 底部信息
             st.caption(f"最后更新: {module.last_update.strftime('%Y-%m-%d %H:%M:%S') if module.last_update else 'N/A'} | "
                        f"API调用: {module.client.request_count} | Finnhub")
