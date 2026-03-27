@@ -37,14 +37,12 @@ import hashlib
 # Finnhub API Key (你的key)
 FINNHUB_API_KEY = "d731rl1r01qn7f07ak4gd731rl1r01qn7f07ak50"
 
-# Telegram配置 (使用你现有的Cloudflare Worker)
+# Telegram配置 (Alex的Bot)
 TELEGRAM_CONFIG = {
     'enabled': True,
-    # 使用你现有的Cloudflare Worker endpoint
-    # 或者直接使用Telegram Bot API
-    'webhook_url': None,  # 如果有Cloudflare Worker URL填这里
-    'bot_token': None,    # 或者直接填Bot Token
-    'chat_id': None,      # 你的Chat ID
+    'webhook_url': None,
+    'bot_token': '8248072555:AAHkwoaABdhH_hTY_4PnNUtHNBgjNHtm3rs',
+    'chat_id': '1821401964',
 }
 
 class SentimentLevel(Enum):
