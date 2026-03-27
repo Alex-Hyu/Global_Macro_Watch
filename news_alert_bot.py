@@ -327,7 +327,7 @@ class NewsAlertBot:
                 cat_emojis = [MACRO_KEYWORDS.get(c, {}).get('emoji', '') for c in n.categories if MACRO_KEYWORDS.get(c, {}).get('always_push', False)]
                 cat_str = ''.join(cat_emojis[:2])
                 sent_emoji = "🟢" if n.sentiment_score > 0.2 else "🔴" if n.sentiment_score < -0.2 else "🟡"
-                important_section += f"{cat_str}{sent_emoji} {n.headline[:55]}...\n"
+                important_section += f"{cat_str}{sent_emoji} {n.headline[:100]}...\n"
         
         # 检查是否有HIGH/EXTREME预警
         high_alerts = [a for a in alerts if a.level in ['HIGH', 'EXTREME']]
