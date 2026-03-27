@@ -30,7 +30,7 @@ import json
 import os
 
 FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd732oopr01qn7f07d8lgd732oopr01qn7f07d8m0')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8248072555:AAHkwoaABdhH_hTY_4PnNUtHNBgjNHtm3rs')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8248072555:AAEL6UgADE5_4EH_oTDponnEyFiT-t8ofcs')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '1821401964')
 
 # 刷新间隔（秒）
