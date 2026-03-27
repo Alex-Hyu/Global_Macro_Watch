@@ -392,18 +392,27 @@ class NewsAlertBot:
                 emoji = "➡️"
                 mood = "中性"
             
+            # 统计类别
+            cat_counts = {}
+            for n in recent:
+                for cat in n.categories:
+                    cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            
+            top_cat = ""
+            if cat_counts:
+                top = max(cat_counts.items(), key=lambda x: x[1])
+                top_cat = f" | 热点: {MACRO_KEYWORDS[top[0]]['emoji']}{top[1]}条"
+            
             message = f"""📰 *新闻情绪快报*
 
 {emoji} 情绪: {mood} ({avg_sent:.2f})
-📊 新闻: {len(recent)}条
+📊 新闻: {len(recent)}条{top_cat}
 ⏰ {datetime.now().strftime('%H:%M')}
 
 _无HIGH预警，市场平稳_"""
             
-            if self.send_telegram(message):
-                print(f"[INFO] 已发送摘要")
-            else:
-                print(f"[ERROR] 发送摘要失败")
+            self.send_telegram(message)
+            print(f"[INFO] 已发送摘要")
         
         # 每日摘要
         if SEND_DAILY_SUMMARY:
