@@ -27,12 +27,12 @@ import json
 # 配置 - 修改这里
 # ============================================================================
 
-FINNHUB_API_KEY = "d731rl1r01qn7f07ak4gd731rl1r01qn7f07ak50"
+FINNHUB_API_KEY = "d732oopr01qn7f07d8lgd732oopr01qn7f07d8m0"
 TELEGRAM_BOT_TOKEN = "8248072555:AAHkwoaABdhH_hTY_4PnNUtHNBgjNHtm3rs"
 TELEGRAM_CHAT_ID = "1821401964"
 
 # 刷新间隔（秒）
-REFRESH_INTERVAL = 300  # 5分钟
+REFRESH_INTERVAL = 600  # 5分钟
 
 # 是否推送每日摘要
 SEND_DAILY_SUMMARY = True
@@ -111,13 +111,18 @@ class NewsAlertBot:
         url = "https://finnhub.io/api/v1/news"
         params = {'category': 'general', 'token': FINNHUB_API_KEY}
         
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            return response.json()[:30]  # 最新30条
-        except Exception as e:
-            print(f"[ERROR] 获取新闻失败: {e}")
-            return []
+        # 重试3次
+        for attempt in range(3):
+            try:
+                response = requests.get(url, params=params, timeout=30)  # 超时改为30秒
+                response.raise_for_status()
+                return response.json()[:30]
+            except Exception as e:
+                print(f"[WARN] 获取新闻失败 (尝试 {attempt+1}/3): {e}")
+                if attempt < 2:
+                    time.sleep(5)  # 等5秒再试
+        
+        return []
     
     def analyze_sentiment(self, text: str) -> float:
         """简单情绪分析"""
