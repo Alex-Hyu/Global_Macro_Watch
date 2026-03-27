@@ -368,11 +368,51 @@ class NewsAlertBot:
         # 生成预警
         alerts = self.generate_alerts(news_items)
         
-        # 发送预警
+        # 计算情绪
+        recent = [n for n in news_items if n.datetime > datetime.now() - timedelta(hours=4)]
+        avg_sent = sum(n.sentiment_score for n in recent) / len(recent) if recent else 0
+        
+        # 发送预警（HIGH/EXTREME）
+        alert_sent = False
         for alert in alerts:
             if alert.level in ['HIGH', 'EXTREME']:
                 if self.send_alert(alert):
                     print(f"[ALERT] 已发送: {alert.message}")
+                    alert_sent = True
+        
+        # 每次都发送简要摘要
+        if not alert_sent:
+            if avg_sent > 0.2:
+                emoji = "📈"
+                mood = "偏多"
+            elif avg_sent < -0.2:
+                emoji = "📉"
+                mood = "偏空"
+            else:
+                emoji = "➡️"
+                mood = "中性"
+            
+            # 统计类别
+            cat_counts = {}
+            for n in recent:
+                for cat in n.categories:
+                    cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            
+            top_cat = ""
+            if cat_counts:
+                top = max(cat_counts.items(), key=lambda x: x[1])
+                top_cat = f" | 热点: {MACRO_KEYWORDS[top[0]]['emoji']}{top[1]}条"
+            
+            message = f"""📰 *新闻情绪快报*
+
+{emoji} 情绪: {mood} ({avg_sent:.2f})
+📊 新闻: {len(recent)}条{top_cat}
+⏰ {datetime.now().strftime('%H:%M')}
+
+_无HIGH预警，市场平稳_"""
+            
+            self.send_telegram(message)
+            print(f"[INFO] 已发送摘要")
         
         # 每日摘要
         if SEND_DAILY_SUMMARY:
