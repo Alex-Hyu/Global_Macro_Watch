@@ -1591,7 +1591,6 @@ def main():
         
         # 自动刷新逻辑
         if news_auto_refresh:
-            from datetime import datetime, timedelta
             if module.last_update is None or \
                (datetime.now() - module.last_update).seconds > 300:
                 module.fetch_and_analyze_news(include_tickers=news_include_tickers)
