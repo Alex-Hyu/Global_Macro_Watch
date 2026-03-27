@@ -380,39 +380,57 @@ class NewsAlertBot:
                     print(f"[ALERT] 已发送: {alert.message}")
                     alert_sent = True
         
-        # 每次都发送简要摘要
-        if not alert_sent:
-            if avg_sent > 0.2:
-                emoji = "📈"
-                mood = "偏多"
-            elif avg_sent < -0.2:
-                emoji = "📉"
-                mood = "偏空"
-            else:
-                emoji = "➡️"
-                mood = "中性"
-            
-            # 统计类别
-            cat_counts = {}
-            for n in recent:
-                for cat in n.categories:
-                    cat_counts[cat] = cat_counts.get(cat, 0) + 1
-            
-            top_cat = ""
-            if cat_counts:
-                top = max(cat_counts.items(), key=lambda x: x[1])
-                top_cat = f" | 热点: {MACRO_KEYWORDS[top[0]]['emoji']}{top[1]}条"
-            
-            message = f"""📰 *新闻情绪快报*
+        # 筛选重要新闻（Fed/地缘/MAG7/宏观数据）
+        important_news = []
+        for n in recent:
+            for cat in n.categories:
+                if MACRO_KEYWORDS.get(cat, {}).get('always_push', False):
+                    important_news.append(n)
+                    break
+        
+        # 去重
+        seen_headlines = set()
+        unique_important = []
+        for n in important_news:
+            if n.headline not in seen_headlines:
+                seen_headlines.add(n.headline)
+                unique_important.append(n)
+        
+        # 构建消息
+        if avg_sent > 0.2:
+            emoji = "📈"
+            mood = "偏多"
+        elif avg_sent < -0.2:
+            emoji = "📉"
+            mood = "偏空"
+        else:
+            emoji = "➡️"
+            mood = "中性"
+        
+        message = f"""📰 *新闻情绪快报*
 
 {emoji} 情绪: {mood} ({avg_sent:.2f})
-📊 新闻: {len(recent)}条{top_cat}
-⏰ {datetime.now().strftime('%H:%M')}
-
-_无HIGH预警，市场平稳_"""
-            
-            self.send_telegram(message)
-            print(f"[INFO] 已发送摘要")
+📊 新闻: {len(recent)}条 | 重要: {len(unique_important)}条
+⏰ {datetime.now().strftime('%H:%M')} UTC
+"""
+        
+        # 添加重要新闻headlines
+        if unique_important:
+            message += "\n*📌 重要新闻:*\n"
+            for n in unique_important[:8]:  # 最多8条
+                # 类别emoji
+                cat_emojis = [MACRO_KEYWORDS.get(c, {}).get('emoji', '') for c in n.categories if MACRO_KEYWORDS.get(c, {}).get('always_push', False)]
+                cat_str = ''.join(cat_emojis[:2])
+                
+                # 情绪emoji
+                sent_emoji = "🟢" if n.sentiment_score > 0.2 else "🔴" if n.sentiment_score < -0.2 else "🟡"
+                
+                message += f"{cat_str}{sent_emoji} {n.headline[:55]}...\n"
+        else:
+            message += "\n_无重要宏观新闻_"
+        
+        self.send_telegram(message)
+        print(f"[INFO] 已发送摘要，包含 {len(unique_important)} 条重要新闻")
         
         # 每日摘要
         if SEND_DAILY_SUMMARY:
