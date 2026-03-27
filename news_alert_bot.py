@@ -24,14 +24,14 @@ from dataclasses import dataclass
 import json
 
 # ============================================================================
-# 配置 - 从环境变量读取，本地运行可硬编码
+# 配置 - 从环境变量读取（GitHub Secrets）
 # ============================================================================
 
 import os
 
-FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd732oopr01qn7f07d8lgd732oopr01qn7f07d8m0')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8248072555:AAEL6UgADE5_4EH_oTDponnEyFiT-t8ofcs')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '1821401964')
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', '')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 # 刷新间隔（秒）
 REFRESH_INTERVAL = 300  # 5分钟
@@ -354,7 +354,6 @@ class NewsAlertBot:
     def run_once(self):
         """执行一次检查"""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 检查新闻...")
-        self.send_telegram("🔄 *新闻检查完成*\n\n正在分析中...")
         
         # 获取新闻
         raw_news = self.fetch_news()
